@@ -60,8 +60,11 @@ HTTP_TIMEOUT = 60
 BUILTIN_TABLES = [
     ("Satellite", "https://stellabms.xyz/sl/header.json"),
     ("Stella", "https://stellabms.xyz/st/header.json"),
-    ("発狂BMS難易度表", "https://rattoto10.github.io/second_table/insane_header.json"),
-    ("第2通常難易度表", "https://bmsnormal2.syuriken.jp/js/header.json"),
+    ("発狂BMS難易度表（★・GENOCIDE）",
+     "https://miraiscarlet.github.io/bms/table/genocide_insane/header_insane.json"),
+    ("NEW GENERATION 発狂難易度表（▼・第二期）",
+     "https://rattoto10.github.io/second_table/insane_header.json"),
+    ("第2通常難易度表（▽）", "https://bmsnormal2.syuriken.jp/js/header.json"),
 ]
 
 DEFAULT_BPM_RANGES = [
@@ -79,6 +82,29 @@ DEFAULT_BP_RANGES = [
     ("BP11〜20", 11, 20),
     ("BP21〜50", 21, 50),
     ("BP51〜", 51, None),
+]
+
+# クリアランプ。値は beatoraja の ClearType の id。
+#   ClearType.java: NoPlay(0), Failed(1), AssistEasy(2), LightAssistEasy(3),
+#                   Easy(4), Normal(5), Hard(6), ExHard(7), FullCombo(8),
+#                   Perfect(9), Max(10)
+CLEAR_LAMPS = [
+    ("NO PLAY", 0), ("FAILED", 1), ("ASSIST", 2), ("L-ASSIST", 3),
+    ("EASY", 4), ("CLEAR", 5), ("HARD", 6), ("EX-HARD", 7),
+    ("FULLCOMBO", 8), ("PERFECT", 9), ("MAX", 10),
+]
+LAMP_NAMES = [name for name, _id in CLEAR_LAMPS]
+LAMP_IDS = dict(CLEAR_LAMPS)
+
+DEFAULT_LAMP_RANGES = [
+    ("FAILED", "FAILED", "FAILED"),
+    ("ASSIST", "ASSIST", "L-ASSIST"),
+    ("EASY", "EASY", "EASY"),
+    ("CLEAR", "CLEAR", "CLEAR"),
+    ("HARD", "HARD", "HARD"),
+    ("EX-HARD", "EX-HARD", "EX-HARD"),
+    ("FULLCOMBO", "FULLCOMBO", "FULLCOMBO"),
+    ("PERFECT", "PERFECT", "MAX"),
 ]
 
 # DJ LEVEL。値はスコアレートのしきい値（9分のいくつ以上か）。
@@ -293,6 +319,22 @@ def bp_sql(lo, hi) -> str:
     return " AND ".join(conds)
 
 
+def lamp_sql(lo: str, hi: str) -> str:
+    """
+    クリアランプの範囲（lo以上 hi以下）を表すWHERE句。
+    未プレイの譜面は score.clear が NULL のため、どの範囲にも入らない。
+    """
+    lo_id, hi_id = LAMP_IDS.get(lo), LAMP_IDS.get(hi)
+    if lo_id is not None and hi_id is not None and lo_id == hi_id:
+        return f"score.clear = {lo_id}"
+    conds = []
+    if lo_id is not None:
+        conds.append(f"score.clear >= {lo_id}")
+    if hi_id is not None:
+        conds.append(f"score.clear <= {hi_id}")
+    return " AND ".join(conds) if conds else "score.clear IS NOT NULL"
+
+
 def dj_level_sql(lo: str, hi: str) -> str:
     """
     DJ LEVEL の範囲（lo以上 hi以下）を表すWHERE句。
@@ -324,28 +366,33 @@ def and_sql(*parts) -> str:
 #   選ばれた条件を 難易度表 → BPM → BP の順に入れ子にする。
 #   選ばれなかった段は飛ばす。
 # ===========================================================================
-def used_labels(use_bpm: bool, use_bp: bool, use_score: bool) -> list:
+def used_labels(use_bpm: bool, use_bp: bool, use_lamp: bool = False,
+                use_score: bool = False) -> list:
     labels = []
     if use_bpm:
         labels.append("BPM")
     if use_bp:
         labels.append("BP")
+    if use_lamp:
+        labels.append("LAMP")
     if use_score:
         labels.append("SCORE")
     return labels
 
 
-def suffix_for(use_bpm: bool, use_bp: bool, use_score: bool = False) -> str:
-    labels = used_labels(use_bpm, use_bp, use_score)
+def suffix_for(use_bpm: bool, use_bp: bool, use_lamp: bool = False,
+               use_score: bool = False) -> str:
+    labels = used_labels(use_bpm, use_bp, use_lamp, use_score)
     return f"（{'・'.join(labels)}別）" if labels else ""
 
 
 def auto_title(table_names, use_bpm: bool, use_bp: bool,
-               use_score: bool = False) -> str:
+               use_lamp: bool = False, use_score: bool = False) -> str:
     """タイトル未入力のときに使う名前を決める。"""
     if table_names:
-        return "・".join(table_names) + suffix_for(use_bpm, use_bp, use_score)
-    labels = used_labels(use_bpm, use_bp, use_score)
+        return "・".join(table_names) + suffix_for(
+            use_bpm, use_bp, use_lamp, use_score)
+    labels = used_labels(use_bpm, use_bp, use_lamp, use_score)
     return "・".join(labels) + "別" if labels else ""
 
 
@@ -367,6 +414,11 @@ def _bpm_items(bpm_ranges) -> list:
     return items
 
 
+def _lamp_items(lamp_ranges) -> list:
+    return [(item[0], lamp_sql(item[1], item[2]), "score")
+            for item in lamp_ranges]
+
+
 def _score_items(score_ranges) -> list:
     return [(item[0], dj_level_sql(item[1], item[2]), "score")
             for item in score_ranges]
@@ -382,27 +434,30 @@ def table_base_sql(tables) -> str:
     return hash_sql(sorted(set(md5s)), sorted(set(shas)))
 
 
-def build_folder(tables, bpm_conf, bp_conf, score_conf=(False, ()),
-                 title: str = "") -> list:
+def build_folder(tables, bpm_conf, bp_conf, lamp_conf=(False, ()),
+                 score_conf=(False, ()), title: str = "") -> list:
     """
     選んだ条件から、入れ子のないフォルダを1つ作って返す。
 
     難易度表は「その表に入っている譜面だけに絞る」条件として働き、レベルでは
-    分けない。中身は BPM → BP → SCORE の区切りを掛け合わせたものになる。
+    分けない。中身は BPM → BP → LAMP → SCORE の区切りを掛け合わせたものになる。
     難易度表だけを選んだ場合は、中身がレベルごとのフォルダになる。
 
     tables:     [ load_table() の結果, ... ]（空なら難易度表なし）
     bpm_conf:   (使う?, [(名前, 下限, 上限, 変化あり?), ...])
     bp_conf:    (使う?, [(名前, 下限, 上限), ...], 未プレイを作る?)
+    lamp_conf:  (使う?, [(名前, 下限ランプ, 上限ランプ), ...])
     score_conf: (使う?, [(名前, 下限DJ LEVEL, 上限DJ LEVEL), ...])
     title:      フォルダ名。空なら auto_title() の値を使う
     戻り値:     カスタムフォルダの中に足すフォルダ定義のリスト（0件か1件）
     """
     use_bpm, bpm_ranges = bpm_conf
     use_bp, bp_ranges, bp_noplay = bp_conf
+    use_lamp, lamp_ranges = lamp_conf
     use_score, score_ranges = score_conf
     use_bpm = bool(use_bpm and bpm_ranges)
     use_bp = bool(use_bp and (bp_ranges or bp_noplay))
+    use_lamp = bool(use_lamp and lamp_ranges)
     use_score = bool(use_score and score_ranges)
 
     base = ""
@@ -416,6 +471,8 @@ def build_folder(tables, bpm_conf, bp_conf, score_conf=(False, ()),
         dims.append(_bpm_items(bpm_ranges))
     if use_bp:
         dims.append(_bp_items(bp_ranges, bp_noplay))
+    if use_lamp:
+        dims.append(_lamp_items(lamp_ranges))
     if use_score:
         dims.append(_score_items(score_ranges))
 
@@ -445,7 +502,7 @@ def build_folder(tables, bpm_conf, bp_conf, score_conf=(False, ()),
         return []
 
     name = (title or "").strip() or auto_title(
-        [t["name"] for t in tables], use_bpm, use_bp, use_score)
+        [t["name"] for t in tables], use_bpm, use_bp, use_lamp, use_score)
     if not name:
         name = "新しいフォルダ"
     return [{"name": name, "folder": children}]
@@ -658,6 +715,12 @@ def load_tables() -> tuple:
         except Exception as e:  # noqa: BLE001
             msg = f"難易度表の保存ファイルを読めませんでした（{e}）。既定の表で始めます。"
             tables, removed = [], []
+
+    builtin = dict((url, name) for name, url in BUILTIN_TABLES)
+    for t in tables:
+        # まだ取得していない既定の表は、表示名を最新の既定値に合わせる
+        if not t["levels"] and t["url"] in builtin:
+            t["name"] = builtin[t["url"]]
 
     known = {t["url"] for t in tables} | set(removed)
     for name, url in BUILTIN_TABLES:
@@ -990,6 +1053,7 @@ class App(tk.Tk):
         self.bpm_enabled = tk.BooleanVar(value=False)
         self.bp_enabled = tk.BooleanVar(value=True)
         self.bp_noplay = tk.BooleanVar(value=True)
+        self.lamp_enabled = tk.BooleanVar(value=False)
         self.score_enabled = tk.BooleanVar(value=False)
         self.msg_queue: queue.Queue = queue.Queue()
         self.list_rows: list = []
@@ -1098,8 +1162,21 @@ class App(tk.Tk):
                           "プレイ済みの譜面だけが対象です。",
                   foreground="#555").pack(anchor="w", pady=(6, 0))
 
-        # --- 4. SCORE ---
-        s35 = Section(page, "4. SCORE", self.score_enabled, "DJ LEVELで絞る")
+        # --- 4. LAMP ---
+        s34 = Section(page, "4. LAMP", self.lamp_enabled, "クリアランプで絞る")
+        s34.pack(fill="x", padx=6, pady=(10, 0))
+        b = s34.body
+        self.lamp_editor = RankEditor(b, DEFAULT_LAMP_RANGES, LAMP_NAMES, rows=8)
+        self.lamp_editor.pack(fill="x")
+        ttk.Label(b, text="自己ベストのクリアランプ（score.clear）で絞ります。"
+                          "下限・上限は NO PLAY FAILED ASSIST L-ASSIST EASY "
+                          "CLEAR HARD EX-HARD FULLCOMBO PERFECT MAX から選びます。"
+                          "未プレイの譜面はどのランプにも入りません。",
+                  foreground="#555", wraplength=800, justify="left").pack(
+            anchor="w", pady=(6, 0))
+
+        # --- 5. SCORE ---
+        s35 = Section(page, "5. SCORE", self.score_enabled, "DJ LEVELで絞る")
         s35.pack(fill="x", padx=6, pady=(10, 0))
         b = s35.body
         self.score_editor = RankEditor(b, DEFAULT_SCORE_RANGES, DJ_LEVELS)
@@ -1110,8 +1187,8 @@ class App(tk.Tk):
                   foreground="#555", wraplength=800, justify="left").pack(
             anchor="w", pady=(6, 0))
 
-        # --- 5. 生成 ---
-        s4 = ttk.LabelFrame(page, text="5. 生成", padding=10)
+        # --- 6. 生成 ---
+        s4 = ttk.LabelFrame(page, text="6. 生成", padding=10)
         s4.pack(fill="both", expand=True, padx=6, pady=(10, 10))
         tf = ttk.Frame(s4)
         tf.pack(fill="x")
@@ -1121,7 +1198,7 @@ class App(tk.Tk):
         ttk.Label(s4, textvariable=self.hint_var, foreground="#555").pack(
             anchor="w", pady=(4, 0))
         for var in (self.tbl_enabled, self.bpm_enabled, self.bp_enabled,
-                    self.score_enabled):
+                    self.lamp_enabled, self.score_enabled):
             var.trace_add("write", lambda *_a: self._update_hint())
         self._update_hint()
 
@@ -1266,6 +1343,7 @@ class App(tk.Tk):
         name = auto_title(self._selected_table_names(),
                           bool(self.bpm_enabled.get()),
                           bool(self.bp_enabled.get()),
+                          bool(self.lamp_enabled.get()),
                           bool(self.score_enabled.get()))
         if name:
             self.hint_var.set(f"未入力なら「{name}」になります")
@@ -1491,6 +1569,7 @@ class App(tk.Tk):
             "bpm": (self.bpm_enabled.get(), self.bpm_editor.get_ranges()),
             "bp": (self.bp_enabled.get(), self.bp_editor.get_ranges(),
                    self.bp_noplay.get()),
+            "lamp": (self.lamp_enabled.get(), self.lamp_editor.get_ranges()),
             "score": (self.score_enabled.get(),
                       self.score_editor.get_ranges()),
         }
@@ -1515,8 +1594,9 @@ class App(tk.Tk):
 
         use_bpm = p["bpm"][0] and p["bpm"][1]
         use_bp = p["bp"][0] and (p["bp"][1] or p["bp"][2])
+        use_lamp = p["lamp"][0] and p["lamp"][1]
         use_score = p["score"][0] and p["score"][1]
-        if not (p["tables"] or use_bpm or use_bp or use_score):
+        if not (p["tables"] or use_bpm or use_bp or use_lamp or use_score):
             self.log("条件が1つも選ばれていません。")
             return
 
@@ -1541,8 +1621,8 @@ class App(tk.Tk):
             self.log(f"難易度表を保存しました: {self._save_tables()}")
             self.msg_queue.put(("tables", None))
 
-        new_folders = build_folder(tables, p["bpm"], p["bp"], p["score"],
-                                   p["title"])
+        new_folders = build_folder(tables, p["bpm"], p["bp"], p["lamp"],
+                                   p["score"], p["title"])
         if not new_folders:
             self.log("生成する対象がありません。")
             return

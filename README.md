@@ -1,6 +1,6 @@
 # beatoraja カスタムフォルダ作成ツール
 
-難易度表・BPM・BP の条件を1画面で選び、掛け合わせたフォルダを beatoraja の `folder/default.json` に生成・追記するツールです。生成済みのフォルダを一覧して個別に削除することもできます。Python の標準ライブラリだけで動きます。
+難易度表・BPM・BP・クリアランプ・DJ LEVEL の条件を1画面で選び、掛け合わせたフォルダを beatoraja の `folder/default.json` に生成・追記するツールです。生成済みのフォルダを一覧して個別に削除することもできます。Python の標準ライブラリだけで動きます。
 
 ## 起動のしかた
 
@@ -27,7 +27,7 @@ python beatoraja_folder_maker.py
 
 タブは2つです。
 
-- **フォルダを作る** … 上から順に「1. 難易度表」「2. BPM」「3. BP」「4. SCORE」「5. 生成」。使う段だけチェックを入れます
+- **フォルダを作る** … 上から順に「1. 難易度表」「2. BPM」「3. BP」「4. LAMP」「5. SCORE」「6. 生成」。使う段だけチェックを入れます
 - **生成したフォルダ** … `default.json` にある現在のフォルダ一覧。右の「削除」で1件ずつ消せます
 
 上部のファイル指定は両方のタブで共通です。
@@ -56,37 +56,39 @@ python beatoraja_folder_maker.py
 
 1. 画面上部で beatoraja のフォルダを選びます。`folder/default.json` は自動で補われます
 2. 「1. 難易度表」で表を選びます（Ctrl・Shift で複数選択）。使わないならチェックを外します
-3. 「2. BPM」「3. BP」「4. SCORE」も同じように、使う段だけチェックを入れて区切りを決めます
-4. 「5. 生成」の「フォルダ名」に好きな名前を入れます。空のままでも構いません
+3. 「2. BPM」「3. BP」「4. LAMP」「5. SCORE」も同じように、使う段だけチェックを入れて区切りを決めます
+4. 「6. 生成」の「フォルダ名」に好きな名前を入れます。空のままでも構いません
 5. **プレビュー（書き込まない）** を押し、できる中身とファイルサイズをログで確認します
 6. 問題なければ **生成して書き込む** を押します
 7. beatoraja を再起動します
 
 ## 条件の組み合わせ方
 
-**難易度表は「その表に入っている譜面だけに絞る」条件として働きます。** レベルでは分けません。フォルダの中身になるのは BPM・BP・SCORE の区切りで、**BPM → BP → SCORE の順**に名前がつながります。
+**難易度表は「その表に入っている譜面だけに絞る」条件として働きます。** レベルでは分けません。フォルダの中身になるのは BPM・BP・LAMP・SCORE の区切りで、**BPM → BP → LAMP → SCORE の順**に名前がつながります。
 
 | 選んだ条件 | できる中身 |
 |---|---|
 | 難易度表 + BP | `BP0` `BP1〜5` `BP6〜10` … `未プレイ` |
 | 難易度表 + BPM | `低速 〜100` `中速 101〜160` `高速 161〜300` `光速 301〜` `ソフラン` |
+| 難易度表 + LAMP | `FAILED` `ASSIST` `EASY` `CLEAR` `HARD` `EX-HARD` `FULLCOMBO` `PERFECT` |
 | 難易度表 + SCORE | `DJ LEVEL 〜B` `DJ LEVEL A` `DJ LEVEL AA` `DJ LEVEL AAA` |
-| 難易度表 + BP + SCORE | `BP0 / DJ LEVEL AAA` `BP0 / DJ LEVEL AA` … |
-| 難易度表 + BPM + BP + SCORE | `低速 〜100 / BP0 / DJ LEVEL 〜B` … |
+| 難易度表 + LAMP + SCORE | `HARD / DJ LEVEL AA` `HARD / DJ LEVEL AAA` … |
+| 難易度表 + BPM + BP + LAMP + SCORE | `低速 〜100 / BP0 / FAILED / DJ LEVEL 〜B` … |
 | BPM のみ | `低速 〜100` `中速 101〜160` … |
 | BP のみ | `BP0` `BP1〜5` … `未プレイ` |
+| LAMP のみ | `FAILED` … `PERFECT` |
 | SCORE のみ | `DJ LEVEL 〜B` … `DJ LEVEL AAA` |
 | 難易度表のみ | `sl0` `sl1` … `sl12`（この場合だけレベルで分けます） |
 
-BPの「未プレイ」とSCOREを同時に選んだ場合、その組み合わせは作りません。未プレイの譜面にDJ LEVELは付かないため、必ず空になるからです。
+BPの「未プレイ」と LAMP・SCORE を同時に選んだ場合、その組み合わせは作りません。未プレイの譜面にクリアランプもDJ LEVELも付かないため、必ず空になるからです。
 
 たとえば Satellite と BP を選ぶと、Satellite に入っている譜面すべてを対象に、レベルを問わず BP だけで振り分けます。sl0 の譜面も sl12 の譜面も、BP0 なら同じ `BP0` フォルダに入ります。
 
 難易度表を2つ以上選んだ場合は、両方の譜面をまとめた1つの対象になります。難易度表だけを選んだ場合に限り、区別のため表名が頭に付きます（`Satellite sl0`）。
 
-### BPM・BP・SCOREは分けて作るのがおすすめ
+### 条件ごとに分けて作るのがおすすめ
 
-複数を同時に選ぶと、組み合わせの数が掛け算になります。初期値のままなら BPM 5行 × BP 7行（6区間＋未プレイ）で **35フォルダ**、SCORE 4行まで足すと **128フォルダ**（未プレイ × DJ LEVEL の分を除いた数）が1階層に並びます。
+複数を同時に選ぶと、組み合わせの数が掛け算になります。初期値のままなら BPM 5行 × BP 7行（6区間＋未プレイ）で **35フォルダ**、LAMP 8行と SCORE 4行まで足すと **960フォルダ**（1120通りから未プレイとの組み合わせ160通りを除いた数）が1階層に並びます。
 
 ```
 カスタムフォルダ
@@ -101,15 +103,16 @@ BPの「未プレイ」とSCOREを同時に選んだ場合、その組み合わ�
 
 1. BPMだけを選んで `Satellite（BPM別）` を作る（5フォルダ）
 2. BPだけを選んで `Satellite（BP別）` を作る（7フォルダ）
-3. SCOREだけを選んで `Satellite（SCORE別）` を作る（4フォルダ）
+3. LAMPだけを選んで `Satellite（LAMP別）` を作る（8フォルダ）
+4. SCOREだけを選んで `Satellite（SCORE別）` を作る（4フォルダ）
 
-合わせて16フォルダで済み、「今日は中速をやりたい」「BPを減らしたい」「AAAを狙いたい」のどこからでも入れます。ファイルも小さくなります。
+合わせて24フォルダで済み、「今日は中速をやりたい」「BPを減らしたい」「HARDを埋めたい」「AAAを狙いたい」のどこからでも入れます。ファイルも小さくなります。
 
-掛け合わせたいときは、区切りを絞ってから作ってください。たとえばBPM側を `ソフラン` の1行だけ、SCORE側を `DJ LEVEL AA` の1行だけにすれば、BP7区間と合わせて7フォルダで収まります。
+掛け合わせたいときは、区切りを絞ってから作ってください。たとえばLAMP側を `EASY` と `CLEAR` の2行だけ、SCORE側を `DJ LEVEL AA` の1行だけにすれば、2フォルダで収まります。
 
 ## フォルダ名
 
-「4. 生成」のテキストボックスで決めます。空のままにすると、下に案内が出ている自動の名前になります。
+「6. 生成」のテキストボックスで決めます。空のままにすると、下に案内が出ている自動の名前になります。
 
 | 条件例 | 自動の名前 |
 |---|---|
@@ -117,11 +120,13 @@ BPの「未プレイ」とSCOREを同時に選んだ場合、その組み合わ�
 | Satellite + BPM | `Satellite（BPM別）` |
 | Satellite + BPM + BP | `Satellite（BPM・BP別）` |
 | Satellite + Stella + BP | `Satellite・Stella（BP別）` |
+| Satellite + LAMP | `Satellite（LAMP別）` |
 | Satellite + SCORE | `Satellite（SCORE別）` |
 | BPM のみ | `BPM別` |
 | BP のみ | `BP別` |
+| LAMP のみ | `LAMP別` |
 | SCORE のみ | `SCORE別` |
-| BPM + BP + SCORE | `BPM・BP・SCORE別` |
+| BPM + BP + LAMP + SCORE | `BPM・BP・LAMP・SCORE別` |
 
 `カスタムフォルダ` の中に同じ名前のフォルダが既にある場合は、そのフォルダだけが置き換わります。作り分けたいときは名前を変えてください。
 
@@ -129,14 +134,15 @@ BPの「未プレイ」とSCOREを同時に選んだ場合、その組み合わ�
 
 ### 1. 難易度表
 
-初期状態で4つの表に対応しています。
+初期状態で5つの表に対応しています。
 
-| 表 | header |
-|---|---|
-| Satellite（sl0〜sl12） | `https://stellabms.xyz/sl/header.json` |
-| Stella（st0〜st12） | `https://stellabms.xyz/st/header.json` |
-| 発狂BMS難易度表（▼0-〜▼24） | `https://rattoto10.github.io/second_table/insane_header.json` |
-| 第2通常難易度表（▽1〜▽12+） | `https://bmsnormal2.syuriken.jp/js/header.json` |
+| 表 | レベル表記 | header |
+|---|---|---|
+| Satellite | `sl0`〜`sl12` | `https://stellabms.xyz/sl/header.json` |
+| Stella | `st0`〜`st12` | `https://stellabms.xyz/st/header.json` |
+| 発狂BMS難易度表（★・GENOCIDE） | `★1`〜`★25` `★???` | `https://miraiscarlet.github.io/bms/table/genocide_insane/header_insane.json` |
+| NEW GENERATION 発狂難易度表（▼・第二期） | `▼0-`〜`▼24` `▼?` | `https://rattoto10.github.io/second_table/insane_header.json` |
+| 第2通常難易度表（▽） | `▽1`〜`▽12+` | `https://bmsnormal2.syuriken.jp/js/header.json` |
 
 一覧には表の名前と状態（`未取得` または `2417譜面 / 13レベル / 2026-08-24 取得`）が出ます。選ぶと下にURLが出ます。
 
@@ -146,7 +152,7 @@ BPの「未プレイ」とSCOREを同時に選んだ場合、その組み合わ�
 
 **取得した表は保存されます。** いちど取得すれば、アプリを閉じても次の起動でそのまま使えます。ネットにつながっていなくてもフォルダを作れます。表が更新されたときは、その表を選んで「選択した表を取得 / 更新」を押すと最新に入れ替わります。
 
-**表を削除する** … 「選択した表を削除」を押すと、一覧から消え、保存してあるデータも消えます。既定の4つの表も削除できます。削除は記録されるので、次に起動しても戻ってきません。同じURLを「追加」すれば復活します。すでに作ったフォルダは削除しても残ります。
+**表を削除する** … 「選択した表を削除」を押すと、一覧から消え、保存してあるデータも消えます。既定の5つの表も削除できます。削除は記録されるので、次に起動しても戻ってきません。同じURLを「追加」すれば復活します。すでに作ったフォルダは削除しても残ります。
 
 ### 2. BPM
 
@@ -185,7 +191,40 @@ score.minbp IS NOT NULL AND score.minbp >= 1 AND score.minbp <= 5
 
 参照するのは `player/<プレイヤー名>/score.db` です。プレイヤーを切り替えると中身も変わります。
 
-### 4. SCORE
+### 4. LAMP
+
+自己ベストのクリアランプで絞ります。初期値は `FAILED` `ASSIST` `EASY` `CLEAR` `HARD` `EX-HARD` `FULLCOMBO` `PERFECT` の8つです。
+
+下限と上限は次から選びます。括弧内は beatoraja が `score.db` に記録している値です。
+
+| 選べる値 | score.clear | 備考 |
+|---|---|---|
+| `NO PLAY` | 0 | |
+| `FAILED` | 1 | |
+| `ASSIST` | 2 | ASSIST EASY |
+| `L-ASSIST` | 3 | LIGHT ASSIST EASY |
+| `EASY` | 4 | |
+| `CLEAR` | 5 | NORMAL |
+| `HARD` | 6 | |
+| `EX-HARD` | 7 | |
+| `FULLCOMBO` | 8 | |
+| `PERFECT` | 9 | |
+| `MAX` | 10 | |
+
+初期値の `ASSIST` は下限 `ASSIST`・上限 `L-ASSIST` で2種類をまとめ、`PERFECT` は下限 `PERFECT`・上限 `MAX` でまとめています。生成されるSQLは次の形です。
+
+```
+score.clear = 6
+score.clear >= 9 AND score.clear <= 10
+```
+
+「HARD以上」のようなフォルダを作るなら、下限 `HARD`・上限 `MAX` で1行足してください。
+
+未プレイの譜面はどのランプにも入りません。`score.db` に記録がなく、比較の対象にならないためです。`NO PLAY` を選んだ場合に入るのは、記録があって値が0の譜面だけです。未プレイを集めたいときは「3. BP」の「未プレイ」を使ってください。
+
+値の対応は beatoraja 本体の `src/bms/player/beatoraja/ClearType.java` に合わせています。
+
+### 5. SCORE
 
 自己ベストのDJ LEVELで絞ります。初期値は `DJ LEVEL 〜B` `DJ LEVEL A` `DJ LEVEL AA` `DJ LEVEL AAA` の4つです。
 
