@@ -6,8 +6,6 @@
 
 `beatoraja_folder_maker.exe` をダブルクリックします。インストールは不要です。好きな場所に置いて構いません（beatoraja のフォルダの中でなくても動きます）。
 
-Python は要りません。設定ファイルも作りません。
-
 ウイルス対策ソフトが警告を出すことがあります。Python製のexeによくある誤検知です。気になる場合は `beatoraja_folder_maker.py` を Python 3.9 以降で直接動かしてください。中身は同じです。
 
 ```
@@ -83,7 +81,7 @@ python beatoraja_folder_maker.py
 
 「4. 生成」のテキストボックスで決めます。空のままにすると、下に案内が出ている自動の名前になります。
 
-| 条件 | 自動の名前 |
+| 条件例 | 自動の名前 |
 |---|---|
 | Satellite + BP | `Satellite（BP別）` |
 | Satellite + BPM | `Satellite（BPM別）` |
