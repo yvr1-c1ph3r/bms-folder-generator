@@ -4,7 +4,7 @@
 
 ## 起動のしかた
 
-`beatoraja_folder_maker.exe` をダブルクリックします。インストールは不要です。好きな場所に置いて構いません（beatoraja のフォルダの中でなくても動きます）。
+`beatoraja_folder_maker.exe` をダブルクリックします。好きな場所に置いて構いません（beatoraja のフォルダの中でなくても動きます）。
 
 ウイルス対策ソフトが警告を出すことがあります。Python製のexeによくある誤検知です。気になる場合は `beatoraja_folder_maker.py` を Python 3.9 以降で直接動かしてください。中身は同じです。
 
@@ -19,6 +19,9 @@ python beatoraja_folder_maker.py
 | `beatoraja_folder_maker.exe` | 本体。これをダブルクリック |
 | `beatoraja_folder_maker.py` | 中身のソース |
 | `README.md` | この説明 |
+| `difficulty_tables.json` | 取り込んだ難易度表の保存先。初回の取得時に自動で作られます |
+
+`difficulty_tables.json` は exe と同じフォルダに作ります。そこに書き込めない場合（Program Files に置いたときなど）は `%LOCALAPPDATA%\beatoraja_folder_maker\` に作ります。実際の場所は起動直後のログに出ます。
 
 ## 画面の構成
 
@@ -106,9 +109,15 @@ python beatoraja_folder_maker.py
 | 発狂BMS難易度表（▼0-〜▼24） | `https://rattoto10.github.io/second_table/insane_header.json` |
 | 第2通常難易度表（▽1〜▽12+） | `https://bmsnormal2.syuriken.jp/js/header.json` |
 
-他の表を足したいときは、下の入力欄に表のページURL（例 `https://stellabms.xyz/sl/table.html`）か `header.json` のURLを入れて「追加」を押します。ページURLなら `<meta name="bmstable">` からヘッダを自動で探します。BMS Table 形式（header + data の2ファイル構成）の表であれば、たいていそのまま読めます。
+一覧には表の名前と状態（`未取得` または `2417譜面 / 13レベル / 2026-08-24 取得`）が出ます。選ぶと下にURLが出ます。
 
-一度取得した表はアプリを終了するまで再利用します。表が更新されたときは、アプリを再起動してから作り直してください。
+**表を追加する** … 下の入力欄に表のページURL（例 `https://stellabms.xyz/sl/table.html`）か `header.json` のURLを入れて「追加」を押します。ページURLなら `<meta name="bmstable">` からヘッダを自動で探します。BMS Table 形式（header + data の2ファイル構成）の表であれば、たいていそのまま読めます。
+
+**表を取得する** … 「選択した表を取得 / 更新」を押すと、いま取得して保存します。押さずにフォルダを生成した場合も、その時に取得して保存します。
+
+**取得した表は保存されます。** いちど取得すれば、アプリを閉じても次の起動でそのまま使えます。ネットにつながっていなくてもフォルダを作れます。表が更新されたときは、その表を選んで「選択した表を取得 / 更新」を押すと最新に入れ替わります。
+
+**表を削除する** … 「選択した表を削除」を押すと、一覧から消え、保存してあるデータも消えます。既定の4つの表も削除できます。削除は記録されるので、次に起動しても戻ってきません。同じURLを「追加」すれば復活します。すでに作ったフォルダは削除しても残ります。
 
 ### 2. BPM
 
@@ -181,16 +190,8 @@ beatoraja 本体（`SQLiteSongDatabaseAccessor#getSongDatas`）と同じ形のSQ
 - `カスタムフォルダ` が無い状態では先頭に作られ、既にある状態では中身に足されること。同名で作り直すとその1本だけが置き換わり、他のトップレベルフォルダが動かないこと
 - `カスタムフォルダ` と同名でSQLを直接持つフォルダがある場合に、書き込まずエラーを出すこと
 - 中の1本だけの削除と、`カスタムフォルダ` ごとの削除が、どちらも正しく書き戻されること
+- 難易度表が保存され、アプリを閉じたあとの再読み込みでレベルの中身まで一致すること。保存したデータだけでフォルダが作れること
+- 削除した既定の表が再起動で戻ってこないこと。同じURLを追加し直せば復活すること。独自に追加した表の追加と削除が残ること
+- 保存ファイルが壊れていた場合に、エラーを知らせて既定の表から始めること
 - BPM4区間・BP6区間・未プレイ・md5照合・sha256照合・md5を5000件並べた場合も期待どおりであること
 - 既存ファイルの読み込み、同名フォルダの置き換え、削除、バックアップ生成が動くこと
-
-## 参考
-
-- beatoraja 本体: <https://github.com/exch-bms2/beatoraja>
-  - `src/bms/player/beatoraja/select/BarManager.java`（`folder/default.json` の読み込み）
-  - `src/bms/player/beatoraja/song/SQLiteSongDatabaseAccessor.java`（SQLの組み立て）
-  - `src/bms/player/beatoraja/TableDataAccessor.java`（難易度表の保存先）
-- カスタムフォルダの解説記事（KasaBlog）
-  - <https://www.kasacontent.com/musicgame/bms/1655/>（LR2編）
-  - <https://www.kasacontent.com/musicgame/beatoraja/4404/>（beatoraja編）
-- カスタムフォルダの実例集: <https://github.com/kasakon555/beatorajaCustomFolder>

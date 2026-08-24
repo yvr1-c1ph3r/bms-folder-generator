@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import queue
 import re
 import shutil
 import sys
 import threading
+import time
 import traceback
 import urllib.error
 import urllib.request
@@ -510,6 +512,116 @@ def guess_default_json(base: Path) -> Path:
     return base / "folder" / "default.json"
 
 
+TABLE_STORE_NAME = "difficulty_tables.json"
+
+
+def app_dir() -> Path:
+    """exe または .py が置かれているフォルダ。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def store_path() -> Path:
+    """
+    難易度表の保存先を決める。まずアプリと同じフォルダ、
+    書き込めなければユーザーフォルダを使う。
+    """
+    here = app_dir() / TABLE_STORE_NAME
+    if here.exists():
+        return here
+    try:
+        probe = app_dir() / (TABLE_STORE_NAME + ".tmp")
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        return here
+    except Exception:  # noqa: BLE001
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CACHE_HOME")
+        root = Path(base) if base else Path.home()
+        return root / "beatoraja_folder_maker" / TABLE_STORE_NAME
+
+
+def new_table_entry(url: str, name: str = "") -> dict:
+    return {"url": url, "name": name or url, "tag": "", "symbol": "",
+            "header_url": "", "levels": [], "fetched_at": None}
+
+
+def load_tables() -> tuple:
+    """
+    保存してある難易度表を読む。戻り値 (tables, removed_urls, message)。
+    ファイルが無ければ既定の表を並べて返す。いちど削除した既定の表は戻さない。
+    """
+    path = store_path()
+    tables, removed, msg = [], [], ""
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            for e in data.get("tables") or []:
+                url = str(e.get("url") or "").strip()
+                if not url:
+                    continue
+                entry = new_table_entry(url, str(e.get("name") or ""))
+                entry["tag"] = str(e.get("tag") or "")
+                entry["symbol"] = str(e.get("symbol") or "")
+                entry["header_url"] = str(e.get("header_url") or "")
+                entry["fetched_at"] = e.get("fetched_at")
+                levels = []
+                for lv in e.get("levels") or []:
+                    levels.append({
+                        "level": str(lv.get("level", "")),
+                        "label": str(lv.get("label", "")),
+                        "md5": [m for m in (lv.get("md5") or [])
+                                if MD5_RE.match(str(m))],
+                        "sha256": [s for s in (lv.get("sha256") or [])
+                                   if SHA256_RE.match(str(s))],
+                        "count": int(lv.get("count") or 0),
+                    })
+                entry["levels"] = levels
+                tables.append(entry)
+            removed = [str(u) for u in (data.get("removed") or [])]
+        except Exception as e:  # noqa: BLE001
+            msg = f"難易度表の保存ファイルを読めませんでした（{e}）。既定の表で始めます。"
+            tables, removed = [], []
+
+    known = {t["url"] for t in tables} | set(removed)
+    for name, url in BUILTIN_TABLES:
+        if url not in known:
+            tables.append(new_table_entry(url, name))
+    return tables, removed, msg
+
+
+def save_tables(tables: list, removed=()) -> Path:
+    """難易度表を保存する。"""
+    path = store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "saved_at": time.time(),
+               "tables": tables, "removed": list(removed)}
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def table_chart_count(entry: dict) -> int:
+    return sum(lv.get("count") or 0 for lv in entry.get("levels") or [])
+
+
+def describe_table(entry: dict) -> str:
+    """一覧に出す状態の説明。"""
+    if not entry.get("levels"):
+        return "未取得"
+    when = entry.get("fetched_at")
+    stamp = ""
+    if when:
+        try:
+            stamp = datetime.fromtimestamp(float(when)).strftime("%Y-%m-%d")
+        except Exception:  # noqa: BLE001
+            stamp = ""
+    n = table_chart_count(entry)
+    lv = len(entry["levels"])
+    return f"{n}譜面 / {lv}レベル" + (f" / {stamp} 取得" if stamp else "")
+
+
 def describe_folder(node) -> str:
     """一覧に出す説明文を作る。"""
     if not isinstance(node, dict):
@@ -678,13 +790,15 @@ class App(tk.Tk):
         self.geometry("900x760")
         self.minsize(840, 640)
 
-        self.tables_cache: dict = {}
-        self.table_urls: list = list(BUILTIN_TABLES)
+        self.tables, self.removed_urls, load_msg = load_tables()
         self.msg_queue: queue.Queue = queue.Queue()
         self.list_rows: list = []
 
         self._build_ui()
         self.after(100, self._drain_queue)
+        if load_msg:
+            self.log(load_msg)
+        self.log(f"難易度表の保存先: {store_path()}")
 
     # -- UI -----------------------------------------------------------------
     def _build_ui(self):
@@ -733,20 +847,32 @@ class App(tk.Tk):
         sb.pack(side="left", fill="y")
         self.tbl_list.configure(yscrollcommand=sb.set)
         self._refresh_table_list()
-        self.tbl_list.selection_set(0)
-        self.tbl_list.bind("<<ListboxSelect>>", lambda _e: self._update_hint())
+        if self.tables:
+            self.tbl_list.selection_set(0)
+        self.tbl_list.bind("<<ListboxSelect>>", lambda _e: self._on_table_select())
+
+        self.tbl_url_var = tk.StringVar()
+        ttk.Label(b, textvariable=self.tbl_url_var, foreground="#555").pack(
+            anchor="w", pady=(2, 0))
+
+        opf = ttk.Frame(b)
+        opf.pack(fill="x", pady=(6, 0))
+        ttk.Button(opf, text="選択した表を取得 / 更新",
+                   command=self._fetch_tables).pack(side="left")
+        ttk.Button(opf, text="選択した表を削除",
+                   command=self._del_table).pack(side="left", padx=(6, 0))
+        ttk.Label(opf, text="取得した表は保存され、次に起動したときもそのまま使えます。",
+                  foreground="#555").pack(side="left", padx=(12, 0))
 
         addf = ttk.Frame(b)
         addf.pack(fill="x", pady=(6, 0))
         ttk.Label(addf, text="表を追加（表のページURL / header.json のURL）").grid(
-            row=0, column=0, columnspan=3, sticky="w")
+            row=0, column=0, columnspan=2, sticky="w")
         self.new_url = tk.StringVar()
         ttk.Entry(addf, textvariable=self.new_url).grid(
             row=1, column=0, sticky="ew", pady=(4, 0))
         ttk.Button(addf, text="追加", command=self._add_table).grid(
             row=1, column=1, padx=(6, 0), pady=(4, 0))
-        ttk.Button(addf, text="一覧から削除", command=self._del_table).grid(
-            row=1, column=2, padx=(6, 0), pady=(4, 0))
         addf.columnconfigure(0, weight=1)
 
         # --- 2. BPM ---
@@ -838,21 +964,95 @@ class App(tk.Tk):
                   foreground="#555").pack(anchor="w", pady=(8, 0))
 
     # -- 小物 ---------------------------------------------------------------
-    def _refresh_table_list(self):
-        keep = [self.table_urls[i][1] for i in self.tbl_list.curselection()] \
-            if self.tbl_list.size() else []
+    def _refresh_table_list(self, keep_urls=None):
+        if keep_urls is None:
+            keep_urls = self._selected_urls()
         self.tbl_list.delete(0, "end")
-        for name, url in self.table_urls:
-            self.tbl_list.insert("end", f"{name}   [{url}]")
-        for i, (_n, u) in enumerate(self.table_urls):
-            if u in keep:
+        for entry in self.tables:
+            self.tbl_list.insert("end",
+                                 f"{entry['name']}   ｜ {describe_table(entry)}")
+        for i, entry in enumerate(self.tables):
+            if entry["url"] in keep_urls:
                 self.tbl_list.selection_set(i)
+        self._on_table_select()
+
+    def _selected_urls(self):
+        return [self.tables[i]["url"] for i in self.tbl_list.curselection()
+                if 0 <= i < len(self.tables)]
+
+    def _selected_entries(self):
+        return [self.tables[i] for i in self.tbl_list.curselection()
+                if 0 <= i < len(self.tables)]
+
+    def _on_table_select(self):
+        sel = self._selected_entries()
+        if len(sel) == 1:
+            self.tbl_url_var.set(sel[0]["url"])
+        elif sel:
+            self.tbl_url_var.set(f"{len(sel)}件を選択中")
+        else:
+            self.tbl_url_var.set("")
+        self._update_hint()
+
+    def _fetch_tables(self):
+        """選んだ表をいま取得（または取り直し）して保存する。"""
+        urls = self._selected_urls()
+        if not urls:
+            messagebox.showwarning(APP_TITLE, "取得する表を選んでください。")
+            return
+        self.btn_preview.state(["disabled"])
+        self.btn_write.state(["disabled"])
+        threading.Thread(target=self._fetch_worker, args=(urls, True),
+                         daemon=True).start()
+
+    def _fetch_worker(self, urls, force):
+        try:
+            for url in urls:
+                entry = self._entry_of(url)
+                if entry is None:
+                    continue
+                if entry["levels"] and not force:
+                    continue
+                self.set_status(f"取得中… {entry['name']}")
+                self.log(f"[難易度表] 取得: {url}")
+                self._store_table(entry, load_table(url))
+                self.log(f"  {entry['name']}（記号 {entry['tag'] or '-'}） "
+                         f"レベル {len(entry['levels'])}種 / "
+                         f"譜面 {table_chart_count(entry)}件")
+            path = self._save_tables()
+            self.log(f"保存しました: {path}")
+            self.set_status("取得しました")
+        except Exception as e:  # noqa: BLE001
+            self.log("―― エラー ――\n" + traceback.format_exc())
+            self.msg_queue.put(("error", str(e)))
+            self.set_status("取得に失敗しました")
+        finally:
+            self.msg_queue.put(("tables", None))
+            self.msg_queue.put(("done", None))
+
+    def _save_tables(self):
+        return save_tables(self.tables, self.removed_urls)
+
+    def _entry_of(self, url):
+        for entry in self.tables:
+            if entry["url"] == url:
+                return entry
+        return None
+
+    @staticmethod
+    def _store_table(entry, table):
+        entry["name"] = table["name"]
+        entry["tag"] = table["tag"]
+        entry["symbol"] = table["symbol"]
+        entry["header_url"] = table["header_url"]
+        entry["levels"] = table["levels"]
+        entry["fetched_at"] = time.time()
 
     def _selected_table_names(self):
-        """一覧で選ばれている表の表示名（未取得のものはURL）を返す。"""
+        """一覧で選ばれている表の表示名を返す。"""
         if not self.tbl_enabled.get():
             return []
-        return [self.table_urls[i][0] for i in self.tbl_list.curselection()]
+        return [e["name"] for e in self._selected_entries()]
 
     def _update_hint(self):
         """フォルダ名を未入力にしたときの名前を案内する。"""
@@ -885,15 +1085,41 @@ class App(tk.Tk):
         if not url.lower().startswith(("http://", "https://")):
             messagebox.showwarning(APP_TITLE, "http:// または https:// のURLを入れてください。")
             return
-        self.table_urls.append((f"（未取得）{url}", url))
-        self._refresh_table_list()
+        if self._entry_of(url) is not None:
+            messagebox.showinfo(APP_TITLE, "その表はすでに一覧にあります。")
+            return
+        self.tables.append(new_table_entry(url))
+        if url in self.removed_urls:
+            self.removed_urls.remove(url)
+        self._save_tables()
+        self._refresh_table_list(keep_urls=[url])
         self.new_url.set("")
         self.log(f"難易度表を一覧に追加しました: {url}")
+        self.log("「選択した表を取得 / 更新」を押すと、いま取得して保存します。")
 
     def _del_table(self):
-        for i in reversed(list(self.tbl_list.curselection())):
-            del self.table_urls[i]
-        self._refresh_table_list()
+        entries = self._selected_entries()
+        if not entries:
+            messagebox.showwarning(APP_TITLE, "削除する表を選んでください。")
+            return
+        names = "\n".join("・" + e["name"] for e in entries)
+        if not messagebox.askyesno(
+                APP_TITLE,
+                f"次の難易度表を一覧から削除します。\n\n{names}\n\n"
+                "保存してあるデータも消えます。"
+                "既に作ったフォルダはそのまま残ります。\nよろしいですか？"):
+            return
+        gone = {e["url"] for e in entries}
+        builtin = {u for _n, u in BUILTIN_TABLES}
+        for url in gone:
+            if url in builtin and url not in self.removed_urls:
+                self.removed_urls.append(url)
+        self.tables = [t for t in self.tables if t["url"] not in gone]
+        self._save_tables()
+        self._refresh_table_list(keep_urls=[])
+        for e in entries:
+            self.log(f"難易度表を削除しました: {e['name']}")
+        self.set_status(f"{len(entries)}件の難易度表を削除しました")
 
     def log(self, msg: str):
         self.msg_queue.put(("log", msg))
@@ -918,6 +1144,8 @@ class App(tk.Tk):
                 elif kind == "refresh":
                     self._refresh_table_list()
                     self.reload_list()
+                elif kind == "tables":
+                    self._refresh_table_list()
         except queue.Empty:
             pass
         self.after(100, self._drain_queue)
@@ -1041,8 +1269,7 @@ class App(tk.Tk):
             messagebox.showwarning(APP_TITLE, "beatoraja のフォルダを指定してください。")
             return
 
-        selected = [self.table_urls[i] for i in self.tbl_list.curselection()] \
-            if self.tbl_enabled.get() else []
+        selected = self._selected_urls() if self.tbl_enabled.get() else []
         if self.tbl_enabled.get() and not selected:
             messagebox.showwarning(APP_TITLE, "難易度表を1つ以上選ぶか、"
                                               "「難易度表で絞る」のチェックを外してください。")
@@ -1082,23 +1309,26 @@ class App(tk.Tk):
             self.log("条件が1つも選ばれていません。")
             return
 
-        tables = []
-        for label, url in p["tables"]:
-            self.set_status(f"難易度表を取得中… {label}")
-            self.log(f"[難易度表] {url}")
-            if url in self.tables_cache:
-                table = self.tables_cache[url]
-                self.log("  （取得済みのデータを使いました）")
+        tables, fetched_any = [], False
+        for url in p["tables"]:
+            entry = self._entry_of(url)
+            if entry is None:
+                continue
+            if not entry["levels"]:
+                self.set_status(f"難易度表を取得中… {entry['name']}")
+                self.log(f"[難易度表] 取得: {url}")
+                self._store_table(entry, load_table(url))
+                fetched_any = True
             else:
-                table = load_table(url)
-                self.tables_cache[url] = table
-                for i, (nm, u) in enumerate(self.table_urls):
-                    if u == url and nm != table["name"]:
-                        self.table_urls[i] = (table["name"], u)
-            total = sum(lv["count"] for lv in table["levels"])
-            self.log(f"  {table['name']}（記号 {table['tag'] or '-'}） "
-                     f"レベル {len(table['levels'])}種 / 譜面 {total}件")
-            tables.append(table)
+                self.log(f"[難易度表] 保存済みのデータを使います: {entry['name']}")
+            self.log(f"  {entry['name']}（記号 {entry['tag'] or '-'}） "
+                     f"レベル {len(entry['levels'])}種 / "
+                     f"譜面 {table_chart_count(entry)}件")
+            tables.append(entry)
+
+        if fetched_any:
+            self.log(f"難易度表を保存しました: {self._save_tables()}")
+            self.msg_queue.put(("tables", None))
 
         new_folders = build_folder(tables, p["bpm"], p["bp"], p["title"])
         if not new_folders:
