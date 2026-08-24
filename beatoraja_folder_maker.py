@@ -65,10 +65,11 @@ BUILTIN_TABLES = [
 ]
 
 DEFAULT_BPM_RANGES = [
-    ("低速 〜100", None, 100),
-    ("中速 101〜160", 101, 160),
-    ("高速 161〜300", 161, 300),
-    ("光速 301〜", 301, None),
+    ("低速 〜100", None, 100, False),
+    ("中速 101〜160", 101, 160, False),
+    ("高速 161〜300", 161, 300, False),
+    ("光速 301〜", 301, None, False),
+    ("ソフラン", None, None, True),
 ]
 
 DEFAULT_BP_RANGES = [
@@ -241,8 +242,20 @@ def hash_sql(md5s: list, sha256s: list) -> str:
     return "(" + " OR ".join(parts) + ")"
 
 
-def bpm_sql(lo, hi) -> str:
-    """BPM条件。song.minbpm / song.maxbpm を使う。"""
+def unpack_range(item) -> tuple:
+    """(名前, 下限, 上限) と (名前, 下限, 上限, フラグ) の両方を受ける。"""
+    name, lo, hi = item[0], item[1], item[2]
+    flag = bool(item[3]) if len(item) > 3 else False
+    return name, lo, hi, flag
+
+
+def bpm_sql(lo, hi, changed: bool = False) -> str:
+    """
+    BPM条件。song.minbpm / song.maxbpm を使う。
+    changed が真なら下限・上限を無視して、BPMが変化する譜面だけにする。
+    """
+    if changed:
+        return "song.minbpm != song.maxbpm"
     conds = []
     if lo is not None:
         conds.append(f"song.minbpm >= {int(lo)}")
@@ -300,9 +313,20 @@ def auto_title(table_names, use_bpm: bool, use_bp: bool) -> str:
 
 
 def _bp_items(bp_ranges, bp_noplay) -> list:
-    items = [(nm, bp_sql(lo, hi)) for nm, lo, hi in bp_ranges]
+    items = []
+    for item in bp_ranges:
+        nm, lo, hi, _flag = unpack_range(item)
+        items.append((nm, bp_sql(lo, hi)))
     if bp_noplay:
         items.append(("未プレイ", "score.clear IS NULL"))
+    return items
+
+
+def _bpm_items(bpm_ranges) -> list:
+    items = []
+    for item in bpm_ranges:
+        nm, lo, hi, changed = unpack_range(item)
+        items.append((nm, bpm_sql(lo, hi, changed)))
     return items
 
 
@@ -343,7 +367,7 @@ def build_folder(tables, bpm_conf, bp_conf, title: str = "") -> list:
 
     dims = []
     if use_bpm:
-        dims.append([(nm, bpm_sql(lo, hi)) for nm, lo, hi in bpm_ranges])
+        dims.append(_bpm_items(bpm_ranges))
     if use_bp:
         dims.append(_bp_items(bp_ranges, bp_noplay))
 
@@ -675,9 +699,10 @@ class ScrollFrame(ttk.Frame):
 class RangeEditor(ttk.Frame):
     """「名前 / 下限 / 上限」のリストを編集する部品。"""
 
-    def __init__(self, master, defaults, unit_label, rows=5):
+    def __init__(self, master, defaults, unit_label, rows=5, flag_text=None):
         super().__init__(master)
-        self.defaults = list(defaults)
+        self.defaults = [unpack_range(d) for d in defaults]
+        self.flag_var = tk.BooleanVar(value=False) if flag_text else None
 
         self.listbox = tk.Listbox(self, height=rows, exportselection=False,
                                   font=("Consolas", 10))
@@ -697,15 +722,21 @@ class RangeEditor(ttk.Frame):
         ttk.Label(form, text="上限").grid(row=0, column=4, padx=(0, 4))
         self.e_hi = ttk.Entry(form, width=6)
         self.e_hi.grid(row=0, column=5, padx=(0, 8))
-        ttk.Button(form, text="追加", width=6, command=self.add).grid(row=0, column=6)
+        col = 6
+        if self.flag_var is not None:
+            ttk.Checkbutton(form, text=flag_text, variable=self.flag_var).grid(
+                row=0, column=col, padx=(0, 8))
+            col += 1
+        ttk.Button(form, text="追加", width=6, command=self.add).grid(
+            row=0, column=col)
         ttk.Button(form, text="削除", width=6, command=self.remove).grid(
-            row=0, column=7, padx=(4, 0))
+            row=0, column=col + 1, padx=(4, 0))
         ttk.Button(form, text="↑", width=3, command=lambda: self.move(-1)).grid(
-            row=0, column=8, padx=(4, 0))
+            row=0, column=col + 2, padx=(4, 0))
         ttk.Button(form, text="↓", width=3, command=lambda: self.move(1)).grid(
-            row=0, column=9, padx=(2, 0))
+            row=0, column=col + 3, padx=(2, 0))
         ttk.Button(form, text="初期値", width=7, command=self.reset).grid(
-            row=0, column=10, padx=(4, 0))
+            row=0, column=col + 4, padx=(4, 0))
 
         self.columnconfigure(0, weight=1)
         self.items = []
@@ -713,7 +744,10 @@ class RangeEditor(ttk.Frame):
 
     def _refresh(self):
         self.listbox.delete(0, "end")
-        for nm, lo, hi in self.items:
+        for nm, lo, hi, flag in self.items:
+            if flag:
+                self.listbox.insert("end", f"{nm:<20} {'BPM変化あり':>15}")
+                continue
             lo_s = "-" if lo is None else str(lo)
             hi_s = "-" if hi is None else str(hi)
             self.listbox.insert("end", f"{nm:<20} {lo_s:>6} 〜 {hi_s:>6}")
@@ -725,6 +759,8 @@ class RangeEditor(ttk.Frame):
 
     def reset(self):
         self.items = list(self.defaults)
+        if self.flag_var is not None:
+            self.flag_var.set(False)
         self._refresh()
 
     def add(self):
@@ -732,22 +768,29 @@ class RangeEditor(ttk.Frame):
         if not name:
             messagebox.showwarning(APP_TITLE, "名前を入れてください。")
             return
+        flag = bool(self.flag_var.get()) if self.flag_var is not None else False
         try:
             lo = self._parse(self.e_lo.get())
             hi = self._parse(self.e_hi.get())
         except ValueError:
             messagebox.showwarning(APP_TITLE, "下限・上限は整数で入れてください。")
             return
-        if lo is None and hi is None:
-            messagebox.showwarning(APP_TITLE, "下限か上限のどちらかは入れてください。")
-            return
-        if lo is not None and hi is not None and lo > hi:
-            messagebox.showwarning(APP_TITLE, "下限が上限を超えています。")
-            return
-        self.items.append((name, lo, hi))
+        if flag:
+            # 変化ありのときは下限・上限を使わない
+            lo = hi = None
+        else:
+            if lo is None and hi is None:
+                messagebox.showwarning(APP_TITLE, "下限か上限のどちらかは入れてください。")
+                return
+            if lo is not None and hi is not None and lo > hi:
+                messagebox.showwarning(APP_TITLE, "下限が上限を超えています。")
+                return
+        self.items.append((name, lo, hi, flag))
         self._refresh()
         for e in (self.e_name, self.e_lo, self.e_hi):
             e.delete(0, "end")
+        if self.flag_var is not None:
+            self.flag_var.set(False)
 
     def remove(self):
         for i in reversed(list(self.listbox.curselection())):
@@ -791,6 +834,19 @@ class App(tk.Tk):
         self.minsize(840, 640)
 
         self.tables, self.removed_urls, load_msg = load_tables()
+        # 画面を組み立てる前に用意しておく（組み立ての途中で参照されるため）
+        self.path_var = tk.StringVar()
+        self.tbl_url_var = tk.StringVar()
+        self.hint_var = tk.StringVar()
+        self.new_url = tk.StringVar()
+        self.title_var = tk.StringVar()
+        self.status = tk.StringVar(value="準備完了")
+        self.list_info = tk.StringVar(
+            value="ファイルを指定して「読み込む」を押してください。")
+        self.tbl_enabled = tk.BooleanVar(value=True)
+        self.bpm_enabled = tk.BooleanVar(value=False)
+        self.bp_enabled = tk.BooleanVar(value=True)
+        self.bp_noplay = tk.BooleanVar(value=True)
         self.msg_queue: queue.Queue = queue.Queue()
         self.list_rows: list = []
 
@@ -808,7 +864,6 @@ class App(tk.Tk):
             anchor="w")
         row = ttk.Frame(top)
         row.pack(fill="x", pady=(4, 0))
-        self.path_var = tk.StringVar()
         ttk.Entry(row, textvariable=self.path_var).pack(
             side="left", fill="x", expand=True)
         ttk.Button(row, text="参照…", command=self._choose_dir).pack(
@@ -821,7 +876,6 @@ class App(tk.Tk):
         self._build_make_tab()
         self._build_list_tab()
 
-        self.status = tk.StringVar(value="準備完了")
         ttk.Label(self, textvariable=self.status, anchor="w",
                   padding=(12, 6)).pack(fill="x")
 
@@ -833,7 +887,6 @@ class App(tk.Tk):
         page = sf.inner
 
         # --- 1. 難易度表 ---
-        self.tbl_enabled = tk.BooleanVar(value=True)
         s1 = Section(page, "1. 難易度表", self.tbl_enabled, "難易度表で絞る")
         s1.pack(fill="x", padx=6, pady=(6, 0))
         b = s1.body
@@ -850,8 +903,8 @@ class App(tk.Tk):
         if self.tables:
             self.tbl_list.selection_set(0)
         self.tbl_list.bind("<<ListboxSelect>>", lambda _e: self._on_table_select())
+        self._on_table_select()
 
-        self.tbl_url_var = tk.StringVar()
         ttk.Label(b, textvariable=self.tbl_url_var, foreground="#555").pack(
             anchor="w", pady=(2, 0))
 
@@ -868,7 +921,6 @@ class App(tk.Tk):
         addf.pack(fill="x", pady=(6, 0))
         ttk.Label(addf, text="表を追加（表のページURL / header.json のURL）").grid(
             row=0, column=0, columnspan=2, sticky="w")
-        self.new_url = tk.StringVar()
         ttk.Entry(addf, textvariable=self.new_url).grid(
             row=1, column=0, sticky="ew", pady=(4, 0))
         ttk.Button(addf, text="追加", command=self._add_table).grid(
@@ -876,23 +928,24 @@ class App(tk.Tk):
         addf.columnconfigure(0, weight=1)
 
         # --- 2. BPM ---
-        self.bpm_enabled = tk.BooleanVar(value=False)
         s2 = Section(page, "2. BPM", self.bpm_enabled, "BPMで絞る")
         s2.pack(fill="x", padx=6, pady=(10, 0))
         b = s2.body
-        self.bpm_editor = RangeEditor(b, DEFAULT_BPM_RANGES, "BPM")
+        self.bpm_editor = RangeEditor(b, DEFAULT_BPM_RANGES, "BPM", rows=6,
+                                      flag_text="BPM変化あり")
         self.bpm_editor.pack(fill="x")
-        ttk.Label(b, text="song.minbpm >= 下限 AND song.maxbpm <= 上限 になります。",
-                  foreground="#555").pack(anchor="w", pady=(6, 0))
+        ttk.Label(b, text="song.minbpm >= 下限 AND song.maxbpm <= 上限 になります。"
+                          "「BPM変化あり」を付けた行は下限・上限を無視して、"
+                          "song.minbpm != song.maxbpm になります。",
+                  foreground="#555", wraplength=800, justify="left").pack(
+            anchor="w", pady=(6, 0))
 
         # --- 3. BP ---
-        self.bp_enabled = tk.BooleanVar(value=True)
         s3 = Section(page, "3. BP", self.bp_enabled, "BPで絞る")
         s3.pack(fill="x", padx=6, pady=(10, 0))
         b = s3.body
         r = ttk.Frame(b)
         r.pack(fill="x")
-        self.bp_noplay = tk.BooleanVar(value=True)
         ttk.Checkbutton(r, text="「未プレイ」も作る", variable=self.bp_noplay).pack(
             side="left")
         self.bp_editor = RangeEditor(b, DEFAULT_BP_RANGES, "BP", rows=6)
@@ -907,10 +960,8 @@ class App(tk.Tk):
         tf = ttk.Frame(s4)
         tf.pack(fill="x")
         ttk.Label(tf, text="フォルダ名").pack(side="left")
-        self.title_var = tk.StringVar()
         ttk.Entry(tf, textvariable=self.title_var).pack(
             side="left", fill="x", expand=True, padx=(8, 0))
-        self.hint_var = tk.StringVar()
         ttk.Label(s4, textvariable=self.hint_var, foreground="#555").pack(
             anchor="w", pady=(4, 0))
         for var in (self.tbl_enabled, self.bpm_enabled, self.bp_enabled):
@@ -946,7 +997,6 @@ class App(tk.Tk):
         bar.pack(fill="x")
         ttk.Button(bar, text="読み込む / 再読込", command=self.reload_list).pack(
             side="left")
-        self.list_info = tk.StringVar(value="ファイルを指定して「読み込む」を押してください。")
         ttk.Label(bar, textvariable=self.list_info, foreground="#555").pack(
             side="left", padx=(12, 0))
 
@@ -1407,6 +1457,26 @@ class App(tk.Tk):
             self.log(f"    …ほか {len(nodes) - limit}件")
 
 
+def report_crash(text: str) -> Path | None:
+    """
+    起動できなかったときの内容をファイルに書き出す。
+    exe（--windowed）では画面に何も出ないため、これが唯一の手がかりになる。
+    """
+    for base in (app_dir(), Path(os.environ.get("LOCALAPPDATA") or Path.home())):
+        try:
+            path = Path(base) / "beatoraja_folder_maker_error.log"
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with path.open("a", encoding="utf-8") as f:
+                f.write(f"\n===== {stamp} =====\n")
+                f.write(f"python: {sys.version}\n")
+                f.write(f"exe: {getattr(sys, 'frozen', False)} / {sys.executable}\n")
+                f.write(text)
+            return path
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 def main():
     app = App()
     app.mainloop()
@@ -1416,5 +1486,17 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:  # noqa: BLE001
+        tb = traceback.format_exc()
         traceback.print_exc()
+        log = report_crash(tb)
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror(
+                APP_TITLE,
+                "起動できませんでした。\n\n" + tb.strip().splitlines()[-1]
+                + (f"\n\n詳しい内容: {log}" if log else ""))
+            root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
         sys.exit(1)
