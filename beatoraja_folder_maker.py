@@ -81,6 +81,23 @@ DEFAULT_BP_RANGES = [
     ("BP51〜", 51, None),
 ]
 
+# DJ LEVEL。値はスコアレートのしきい値（9分のいくつ以上か）。
+#   スコアレート = EXスコア / (ノート数 * 2)
+#   AAA=8/9, AA=7/9, A=6/9, B=5/9, C=4/9, D=3/9, E=2/9, それ未満がF
+DJ_LEVELS = ["F", "E", "D", "C", "B", "A", "AA", "AAA"]
+DJ_LEVEL_NINTHS = {"F": 0, "E": 2, "D": 3, "C": 4,
+                   "B": 5, "A": 6, "AA": 7, "AAA": 8}
+
+DEFAULT_SCORE_RANGES = [
+    ("DJ LEVEL 〜B", "F", "B"),
+    ("DJ LEVEL A", "A", "A"),
+    ("DJ LEVEL AA", "AA", "AA"),
+    ("DJ LEVEL AAA", "AAA", "AAA"),
+]
+
+# EXスコア。PGREAT2点 + GREAT1点。
+EX_SCORE = "((score.epg + score.lpg) * 2 + score.egr + score.lgr)"
+
 MD5_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 META_RE = re.compile(r"<meta[^>]*name\s*=\s*[\"']bmstable[\"'][^>]*>", re.IGNORECASE)
@@ -276,6 +293,24 @@ def bp_sql(lo, hi) -> str:
     return " AND ".join(conds)
 
 
+def dj_level_sql(lo: str, hi: str) -> str:
+    """
+    DJ LEVEL の範囲（lo以上 hi以下）を表すWHERE句。
+    割り算を使わず整数の掛け算で比べるため、端の1点でずれない。
+        スコアレート >= k/9  ⇔  EXスコア * 9 >= ノート数 * 2k
+    """
+    conds = ["score.notes > 0"]
+    k_lo = DJ_LEVEL_NINTHS.get(lo, 0)
+    if k_lo > 0:
+        conds.append(f"{EX_SCORE} * 9 >= score.notes * {2 * k_lo}")
+    if hi in DJ_LEVELS:
+        i = DJ_LEVELS.index(hi)
+        if i + 1 < len(DJ_LEVELS):
+            k_next = DJ_LEVEL_NINTHS[DJ_LEVELS[i + 1]]
+            conds.append(f"{EX_SCORE} * 9 < score.notes * {2 * k_next}")
+    return " AND ".join(conds)
+
+
 def and_sql(*parts) -> str:
     """条件をANDで連結する。空文字は無視する。"""
     kept = [p for p in parts if p]
@@ -289,36 +324,38 @@ def and_sql(*parts) -> str:
 #   選ばれた条件を 難易度表 → BPM → BP の順に入れ子にする。
 #   選ばれなかった段は飛ばす。
 # ===========================================================================
-def suffix_for(use_bpm: bool, use_bp: bool) -> str:
-    if use_bpm and use_bp:
-        return "（BPM・BP別）"
+def used_labels(use_bpm: bool, use_bp: bool, use_score: bool) -> list:
+    labels = []
     if use_bpm:
-        return "（BPM別）"
+        labels.append("BPM")
     if use_bp:
-        return "（BP別）"
-    return ""
+        labels.append("BP")
+    if use_score:
+        labels.append("SCORE")
+    return labels
 
 
-def auto_title(table_names, use_bpm: bool, use_bp: bool) -> str:
+def suffix_for(use_bpm: bool, use_bp: bool, use_score: bool = False) -> str:
+    labels = used_labels(use_bpm, use_bp, use_score)
+    return f"（{'・'.join(labels)}別）" if labels else ""
+
+
+def auto_title(table_names, use_bpm: bool, use_bp: bool,
+               use_score: bool = False) -> str:
     """タイトル未入力のときに使う名前を決める。"""
     if table_names:
-        return "・".join(table_names) + suffix_for(use_bpm, use_bp)
-    if use_bpm and use_bp:
-        return "BPM・BP別"
-    if use_bpm:
-        return "BPM別"
-    if use_bp:
-        return "BP別"
-    return ""
+        return "・".join(table_names) + suffix_for(use_bpm, use_bp, use_score)
+    labels = used_labels(use_bpm, use_bp, use_score)
+    return "・".join(labels) + "別" if labels else ""
 
 
 def _bp_items(bp_ranges, bp_noplay) -> list:
     items = []
     for item in bp_ranges:
         nm, lo, hi, _flag = unpack_range(item)
-        items.append((nm, bp_sql(lo, hi)))
+        items.append((nm, bp_sql(lo, hi), ""))
     if bp_noplay:
-        items.append(("未プレイ", "score.clear IS NULL"))
+        items.append(("未プレイ", "score.clear IS NULL", "noplay"))
     return items
 
 
@@ -326,8 +363,13 @@ def _bpm_items(bpm_ranges) -> list:
     items = []
     for item in bpm_ranges:
         nm, lo, hi, changed = unpack_range(item)
-        items.append((nm, bpm_sql(lo, hi, changed)))
+        items.append((nm, bpm_sql(lo, hi, changed), ""))
     return items
+
+
+def _score_items(score_ranges) -> list:
+    return [(item[0], dj_level_sql(item[1], item[2]), "score")
+            for item in score_ranges]
 
 
 def table_base_sql(tables) -> str:
@@ -340,24 +382,28 @@ def table_base_sql(tables) -> str:
     return hash_sql(sorted(set(md5s)), sorted(set(shas)))
 
 
-def build_folder(tables, bpm_conf, bp_conf, title: str = "") -> list:
+def build_folder(tables, bpm_conf, bp_conf, score_conf=(False, ()),
+                 title: str = "") -> list:
     """
     選んだ条件から、入れ子のないフォルダを1つ作って返す。
 
     難易度表は「その表に入っている譜面だけに絞る」条件として働き、レベルでは
-    分けない。中身は BPM や BP の区切りになる。難易度表だけを選んだ場合は、
-    中身がレベルごとのフォルダになる。
+    分けない。中身は BPM → BP → SCORE の区切りを掛け合わせたものになる。
+    難易度表だけを選んだ場合は、中身がレベルごとのフォルダになる。
 
-    tables:   [ load_table() の結果, ... ]（空なら難易度表なし）
-    bpm_conf: (使う?, [(名前, 下限, 上限), ...])
-    bp_conf:  (使う?, [(名前, 下限, 上限), ...], 未プレイを作る?)
-    title:    フォルダ名。空なら auto_title() の値を使う
-    戻り値:   カスタムフォルダの中に足すフォルダ定義のリスト（0件か1件）
+    tables:     [ load_table() の結果, ... ]（空なら難易度表なし）
+    bpm_conf:   (使う?, [(名前, 下限, 上限, 変化あり?), ...])
+    bp_conf:    (使う?, [(名前, 下限, 上限), ...], 未プレイを作る?)
+    score_conf: (使う?, [(名前, 下限DJ LEVEL, 上限DJ LEVEL), ...])
+    title:      フォルダ名。空なら auto_title() の値を使う
+    戻り値:     カスタムフォルダの中に足すフォルダ定義のリスト（0件か1件）
     """
     use_bpm, bpm_ranges = bpm_conf
     use_bp, bp_ranges, bp_noplay = bp_conf
+    use_score, score_ranges = score_conf
     use_bpm = bool(use_bpm and bpm_ranges)
     use_bp = bool(use_bp and (bp_ranges or bp_noplay))
+    use_score = bool(use_score and score_ranges)
 
     base = ""
     if tables:
@@ -370,10 +416,16 @@ def build_folder(tables, bpm_conf, bp_conf, title: str = "") -> list:
         dims.append(_bpm_items(bpm_ranges))
     if use_bp:
         dims.append(_bp_items(bp_ranges, bp_noplay))
+    if use_score:
+        dims.append(_score_items(score_ranges))
 
     children = []
     if dims:
         for combo in itertools.product(*dims):
+            kinds = {part[2] for part in combo if len(part) > 2}
+            # 未プレイ × DJ LEVEL は必ず空になるので作らない
+            if "noplay" in kinds and "score" in kinds:
+                continue
             children.append({
                 "name": " / ".join(part[0] for part in combo),
                 "sql": and_sql(base, *[part[1] for part in combo]),
@@ -393,7 +445,7 @@ def build_folder(tables, bpm_conf, bp_conf, title: str = "") -> list:
         return []
 
     name = (title or "").strip() or auto_title(
-        [t["name"] for t in tables], use_bpm, use_bp)
+        [t["name"] for t in tables], use_bpm, use_bp, use_score)
     if not name:
         name = "新しいフォルダ"
     return [{"name": name, "folder": children}]
@@ -813,6 +865,97 @@ class RangeEditor(ttk.Frame):
         return list(self.items)
 
 
+class RankEditor(ttk.Frame):
+    """「名前 / 下限ランク / 上限ランク」のリストを編集する部品。"""
+
+    def __init__(self, master, defaults, values, rows=4):
+        super().__init__(master)
+        self.defaults = [tuple(d) for d in defaults]
+        self.values = list(values)
+
+        self.listbox = tk.Listbox(self, height=rows, exportselection=False,
+                                  font=("Consolas", 10))
+        self.listbox.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(self, orient="vertical", command=self.listbox.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        self.listbox.configure(yscrollcommand=sb.set)
+
+        form = ttk.Frame(self)
+        form.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Label(form, text="名前").grid(row=0, column=0, padx=(0, 4))
+        self.e_name = ttk.Entry(form, width=16)
+        self.e_name.grid(row=0, column=1, padx=(0, 8))
+        ttk.Label(form, text="下限").grid(row=0, column=2, padx=(0, 4))
+        self.c_lo = ttk.Combobox(form, values=self.values, width=5,
+                                 state="readonly")
+        self.c_lo.grid(row=0, column=3, padx=(0, 8))
+        ttk.Label(form, text="上限").grid(row=0, column=4, padx=(0, 4))
+        self.c_hi = ttk.Combobox(form, values=self.values, width=5,
+                                 state="readonly")
+        self.c_hi.grid(row=0, column=5, padx=(0, 8))
+        ttk.Button(form, text="追加", width=6, command=self.add).grid(
+            row=0, column=6)
+        ttk.Button(form, text="削除", width=6, command=self.remove).grid(
+            row=0, column=7, padx=(4, 0))
+        ttk.Button(form, text="↑", width=3, command=lambda: self.move(-1)).grid(
+            row=0, column=8, padx=(4, 0))
+        ttk.Button(form, text="↓", width=3, command=lambda: self.move(1)).grid(
+            row=0, column=9, padx=(2, 0))
+        ttk.Button(form, text="初期値", width=7, command=self.reset).grid(
+            row=0, column=10, padx=(4, 0))
+
+        self.columnconfigure(0, weight=1)
+        self.items = []
+        self.c_lo.set(self.values[0])
+        self.c_hi.set(self.values[-1])
+        self.reset()
+
+    def _refresh(self):
+        self.listbox.delete(0, "end")
+        for nm, lo, hi in self.items:
+            self.listbox.insert("end", f"{nm:<20} {lo:>4} 〜 {hi:>4}")
+
+    def reset(self):
+        self.items = list(self.defaults)
+        self._refresh()
+
+    def add(self):
+        name = self.e_name.get().strip()
+        lo, hi = self.c_lo.get().strip(), self.c_hi.get().strip()
+        if not name:
+            messagebox.showwarning(APP_TITLE, "名前を入れてください。")
+            return
+        if lo not in self.values or hi not in self.values:
+            messagebox.showwarning(APP_TITLE, "下限と上限を選んでください。")
+            return
+        if self.values.index(lo) > self.values.index(hi):
+            messagebox.showwarning(APP_TITLE, "下限が上限を超えています。")
+            return
+        self.items.append((name, lo, hi))
+        self._refresh()
+        self.e_name.delete(0, "end")
+
+    def remove(self):
+        for i in reversed(list(self.listbox.curselection())):
+            del self.items[i]
+        self._refresh()
+
+    def move(self, delta):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        i = sel[0]
+        j = i + delta
+        if not (0 <= j < len(self.items)):
+            return
+        self.items[i], self.items[j] = self.items[j], self.items[i]
+        self._refresh()
+        self.listbox.selection_set(j)
+
+    def get_ranges(self):
+        return list(self.items)
+
+
 class Section(ttk.LabelFrame):
     """見出し付きの区画。"""
 
@@ -847,6 +990,7 @@ class App(tk.Tk):
         self.bpm_enabled = tk.BooleanVar(value=False)
         self.bp_enabled = tk.BooleanVar(value=True)
         self.bp_noplay = tk.BooleanVar(value=True)
+        self.score_enabled = tk.BooleanVar(value=False)
         self.msg_queue: queue.Queue = queue.Queue()
         self.list_rows: list = []
 
@@ -954,8 +1098,20 @@ class App(tk.Tk):
                           "プレイ済みの譜面だけが対象です。",
                   foreground="#555").pack(anchor="w", pady=(6, 0))
 
-        # --- 4. 生成 ---
-        s4 = ttk.LabelFrame(page, text="4. 生成", padding=10)
+        # --- 4. SCORE ---
+        s35 = Section(page, "4. SCORE", self.score_enabled, "DJ LEVELで絞る")
+        s35.pack(fill="x", padx=6, pady=(10, 0))
+        b = s35.body
+        self.score_editor = RankEditor(b, DEFAULT_SCORE_RANGES, DJ_LEVELS)
+        self.score_editor.pack(fill="x")
+        ttk.Label(b, text="自己ベストのDJ LEVELで絞ります。EXスコア（PGREAT2点 + "
+                          "GREAT1点）とノート数から出すため、プレイ済みの譜面だけが"
+                          "対象です。下限・上限は F E D C B A AA AAA から選びます。",
+                  foreground="#555", wraplength=800, justify="left").pack(
+            anchor="w", pady=(6, 0))
+
+        # --- 5. 生成 ---
+        s4 = ttk.LabelFrame(page, text="5. 生成", padding=10)
         s4.pack(fill="both", expand=True, padx=6, pady=(10, 10))
         tf = ttk.Frame(s4)
         tf.pack(fill="x")
@@ -964,7 +1120,8 @@ class App(tk.Tk):
             side="left", fill="x", expand=True, padx=(8, 0))
         ttk.Label(s4, textvariable=self.hint_var, foreground="#555").pack(
             anchor="w", pady=(4, 0))
-        for var in (self.tbl_enabled, self.bpm_enabled, self.bp_enabled):
+        for var in (self.tbl_enabled, self.bpm_enabled, self.bp_enabled,
+                    self.score_enabled):
             var.trace_add("write", lambda *_a: self._update_hint())
         self._update_hint()
 
@@ -1108,7 +1265,8 @@ class App(tk.Tk):
         """フォルダ名を未入力にしたときの名前を案内する。"""
         name = auto_title(self._selected_table_names(),
                           bool(self.bpm_enabled.get()),
-                          bool(self.bp_enabled.get()))
+                          bool(self.bp_enabled.get()),
+                          bool(self.score_enabled.get()))
         if name:
             self.hint_var.set(f"未入力なら「{name}」になります")
         else:
@@ -1333,6 +1491,8 @@ class App(tk.Tk):
             "bpm": (self.bpm_enabled.get(), self.bpm_editor.get_ranges()),
             "bp": (self.bp_enabled.get(), self.bp_editor.get_ranges(),
                    self.bp_noplay.get()),
+            "score": (self.score_enabled.get(),
+                      self.score_editor.get_ranges()),
         }
         self.btn_preview.state(["disabled"])
         self.btn_write.state(["disabled"])
@@ -1355,7 +1515,8 @@ class App(tk.Tk):
 
         use_bpm = p["bpm"][0] and p["bpm"][1]
         use_bp = p["bp"][0] and (p["bp"][1] or p["bp"][2])
-        if not (p["tables"] or use_bpm or use_bp):
+        use_score = p["score"][0] and p["score"][1]
+        if not (p["tables"] or use_bpm or use_bp or use_score):
             self.log("条件が1つも選ばれていません。")
             return
 
@@ -1380,7 +1541,8 @@ class App(tk.Tk):
             self.log(f"難易度表を保存しました: {self._save_tables()}")
             self.msg_queue.put(("tables", None))
 
-        new_folders = build_folder(tables, p["bpm"], p["bp"], p["title"])
+        new_folders = build_folder(tables, p["bpm"], p["bp"], p["score"],
+                                   p["title"])
         if not new_folders:
             self.log("生成する対象がありません。")
             return
