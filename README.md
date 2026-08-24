@@ -4,16 +4,23 @@
 
 ## 起動のしかた
 
-1. Python 3.9 以降をインストールします（<https://www.python.org/downloads/> の Windows インストーラー。`tcl/tk` のチェックは外さないでください）
-2. `beatoraja_folder_maker.py` をダブルクリックします
+`beatoraja_folder_maker.exe` をダブルクリックします。インストールは不要です。好きな場所に置いて構いません（beatoraja のフォルダの中でなくても動きます）。
 
-コマンドから起動する場合は次のとおりです。
+Python は要りません。設定ファイルも作りません。
+
+ウイルス対策ソフトが警告を出すことがあります。Python製のexeによくある誤検知です。気になる場合は `beatoraja_folder_maker.py` を Python 3.9 以降で直接動かしてください。中身は同じです。
 
 ```
 python beatoraja_folder_maker.py
 ```
 
-exe にしたい場合は `pip install pyinstaller` のあと `pyinstaller --onefile --windowed beatoraja_folder_maker.py` で作れます。
+## ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `beatoraja_folder_maker.exe` | 本体。これをダブルクリック |
+| `beatoraja_folder_maker.py` | 中身のソース |
+| `README.md` | この説明 |
 
 ## 画面の構成
 
