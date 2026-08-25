@@ -33,6 +33,7 @@ import os
 import queue
 import re
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -67,21 +68,53 @@ BUILTIN_TABLES = [
     ("第2通常難易度表（▽）", "https://bmsnormal2.syuriken.jp/js/header.json"),
 ]
 
+# 名前に使う記号。スキンのフォントで表示できない場合はここだけ変えれば全体に効く。
+#   RANGE_DASH … BPM や DJ LEVEL の範囲を表すつなぎ
+#   LE_SYMBOL  … BP の「以下」を表す記号。表示できない環境では "<=" にする
+RANGE_DASH = " - "
+LE_SYMBOL = "≦"
+
+
+def bpm_name(lo, hi, changed: bool = False) -> str:
+    """BPMの区切りの名前を自動で作る。"""
+    if changed:
+        return "BPM変化あり"
+    if lo is not None and hi is not None:
+        return f"{lo}{RANGE_DASH}{hi}" if lo != hi else f"BPM{lo}"
+    if hi is not None:
+        return f"{RANGE_DASH.lstrip()}{hi}"
+    if lo is not None:
+        return f"{lo}{RANGE_DASH.rstrip()}"
+    return "BPM"
+
+
+def bp_name(lo, hi) -> str:
+    """BPの区切りの名前を自動で作る。"""
+    if lo is not None and hi is not None:
+        if lo == hi:
+            return f"BP{lo}"
+        return f"{lo}{LE_SYMBOL}BP{LE_SYMBOL}{hi}"
+    if hi is not None:
+        return f"BP{LE_SYMBOL}{hi}"
+    if lo is not None:
+        return f"{lo}{LE_SYMBOL}BP"
+    return "BP"
+
+
 DEFAULT_BPM_RANGES = [
-    ("低速 〜100", None, 100, False),
-    ("中速 101〜160", 101, 160, False),
-    ("高速 161〜300", 161, 300, False),
-    ("光速 301〜", 301, None, False),
+    (f"低速{RANGE_DASH}100", None, 100, False),
+    (f"中速 101{RANGE_DASH}160", 101, 160, False),
+    (f"高速 161{RANGE_DASH}300", 161, 300, False),
+    (f"光速 301{RANGE_DASH.rstrip()}", 301, None, False),
     ("ソフラン", None, None, True),
 ]
 
 DEFAULT_BP_RANGES = [
-    ("BP0", 0, 0),
-    ("BP1〜5", 1, 5),
-    ("BP6〜10", 6, 10),
-    ("BP11〜20", 11, 20),
-    ("BP21〜50", 21, 50),
-    ("BP51〜", 51, None),
+    (bp_name(None, 10), None, 10),
+    (bp_name(11, 20), 11, 20),
+    (bp_name(21, 30), 21, 30),
+    (bp_name(31, 50), 31, 50),
+    (bp_name(51, None), 51, None),
 ]
 
 # クリアランプ。値は beatoraja の ClearType の id。
@@ -104,7 +137,6 @@ DEFAULT_LAMP_RANGES = [
     ("HARD", "HARD", "HARD"),
     ("EX-HARD", "EX-HARD", "EX-HARD"),
     ("FULLCOMBO", "FULLCOMBO", "FULLCOMBO"),
-    ("PERFECT", "PERFECT", "MAX"),
 ]
 
 # DJ LEVEL。値はスコアレートのしきい値（9分のいくつ以上か）。
@@ -115,7 +147,7 @@ DJ_LEVEL_NINTHS = {"F": 0, "E": 2, "D": 3, "C": 4,
                    "B": 5, "A": 6, "AA": 7, "AAA": 8}
 
 DEFAULT_SCORE_RANGES = [
-    ("DJ LEVEL 〜B", "F", "B"),
+    (f"DJ LEVEL{RANGE_DASH}B", "F", "B"),
     ("DJ LEVEL A", "A", "A"),
     ("DJ LEVEL AA", "AA", "AA"),
     ("DJ LEVEL AAA", "AAA", "AAA"),
@@ -424,6 +456,29 @@ def _score_items(score_ranges) -> list:
             for item in score_ranges]
 
 
+def level_items(tables) -> list:
+    """
+    選んだ表のレベルを (表示名, WHERE句) の並びにする。
+    表示名は記号だけ（sl0、★1）。他の表と重なる場合だけ表名を頭に付ける。
+    """
+    seen = {}
+    for table in tables:
+        for lv in table["levels"]:
+            seen[lv["label"]] = seen.get(lv["label"], 0) + 1
+
+    items = []
+    for table in tables:
+        for lv in table["levels"]:
+            cond = hash_sql(lv["md5"], lv["sha256"])
+            if not cond:
+                continue
+            label = lv["label"]
+            if seen.get(label, 0) > 1:
+                label = f"{table['name']} {label}"
+            items.append((label, cond))
+    return items
+
+
 def table_base_sql(tables) -> str:
     """選んだ難易度表に入っている譜面すべて（レベル問わず）を表すWHERE句。"""
     md5s, shas = [], []
@@ -435,7 +490,8 @@ def table_base_sql(tables) -> str:
 
 
 def build_folder(tables, bpm_conf, bp_conf, lamp_conf=(False, ()),
-                 score_conf=(False, ()), title: str = "") -> list:
+                 score_conf=(False, ()), title: str = "",
+                 split_levels: bool = False) -> list:
     """
     選んだ条件から、入れ子のないフォルダを1つ作って返す。
 
@@ -460,8 +516,13 @@ def build_folder(tables, bpm_conf, bp_conf, lamp_conf=(False, ()),
     use_lamp = bool(use_lamp and lamp_ranges)
     use_score = bool(use_score and score_ranges)
 
+    split_levels = bool(split_levels and tables)
+    levels = level_items(tables) if split_levels else []
+    if split_levels and not levels:
+        return []
+
     base = ""
-    if tables:
+    if tables and not split_levels:
         base = table_base_sql(tables)
         if not base:
             return []
@@ -480,13 +541,22 @@ def build_folder(tables, bpm_conf, bp_conf, lamp_conf=(False, ()),
     if dims:
         for combo in itertools.product(*dims):
             kinds = {part[2] for part in combo if len(part) > 2}
-            # 未プレイ × DJ LEVEL は必ず空になるので作らない
+            # 未プレイ × クリアランプ / DJ LEVEL は必ず空になるので作らない
             if "noplay" in kinds and "score" in kinds:
                 continue
-            children.append({
-                "name": " / ".join(part[0] for part in combo),
-                "sql": and_sql(base, *[part[1] for part in combo]),
-            })
+            name = " / ".join(part[0] for part in combo)
+            cond = and_sql(base, *[part[1] for part in combo])
+            if split_levels:
+                # 組み合わせのフォルダの中に、レベルごとのフォルダを作る
+                children.append({
+                    "name": name,
+                    "folder": [{"name": lab, "sql": and_sql(cond, lv)}
+                               for lab, lv in levels],
+                })
+            else:
+                children.append({"name": name, "sql": cond})
+    elif split_levels:
+        children = [{"name": lab, "sql": lv} for lab, lv in levels]
     elif tables:
         # 難易度表だけを選んだときは、レベルごとのフォルダにする
         multi = len(tables) > 1
@@ -638,7 +708,8 @@ def write_default_json(path: Path, folders: list):
 
 def guess_default_json(base: Path) -> Path:
     """選ばれたパスから folder/default.json の位置を推測する。"""
-    if base.is_file():
+    if base.is_file() or base.suffix.lower() == ".json":
+        # まだ無いファイルを指定された場合もそのまま使う
         return base
     if base.name.lower() == "folder":
         return base / "default.json"
@@ -761,6 +832,149 @@ def describe_table(entry: dict) -> str:
     return f"{n}譜面 / {lv}レベル" + (f" / {stamp} 取得" if stamp else "")
 
 
+# ===========================================================================
+# 譜面数の集計（空フォルダを作らないために使う）
+#   beatoraja 本体と同じ形のSELECTを組み、その行数を数える。
+#   DBはすべて読み取り専用で開くため、beatoraja のデータを書き換えない。
+# ===========================================================================
+COUNT_COLUMNS = (
+    "md5, song.sha256 AS sha256, title, subtitle, genre, artist, subartist,"
+    "path, folder, stagefile, banner, backbmp, parent, song.level AS level,"
+    "difficulty, maxbpm, minbpm, song.mode AS mode, judge, feature, content,"
+    "song.date AS date, favorite, song.notes AS notes, adddate, preview,"
+    "length, charthash")
+
+SCORE_TABLE_DDL = (
+    "CREATE TEMP TABLE score (sha256 TEXT, mode INTEGER, clear INTEGER,"
+    "epg INTEGER, lpg INTEGER, egr INTEGER, lgr INTEGER, egd INTEGER,"
+    "lgd INTEGER, ebd INTEGER, lbd INTEGER, epr INTEGER, lpr INTEGER,"
+    "ems INTEGER, lms INTEGER, notes INTEGER, combo INTEGER, minbp INTEGER,"
+    "avgjudge INTEGER, playcount INTEGER, clearcount INTEGER, trophy TEXT,"
+    "ghost TEXT, option INTEGER, seed INTEGER, random INTEGER, date INTEGER,"
+    "state INTEGER, scorehash TEXT)")
+
+SCORELOG_TABLE_DDL = (
+    "CREATE TEMP TABLE scorelog (sha256 TEXT, mode INTEGER, clear INTEGER,"
+    "oldclear INTEGER, score INTEGER, oldscore INTEGER, combo INTEGER,"
+    "oldcombo INTEGER, minbp INTEGER, oldminbp INTEGER, avgjudge INTEGER,"
+    "oldavgjudge INTEGER, date INTEGER)")
+
+
+def beatoraja_root(target: Path) -> Path:
+    """folder/default.json から beatoraja のフォルダを割り出す。"""
+    parent = target.parent
+    return parent.parent if parent.name.lower() == "folder" else parent
+
+
+def list_players(root: Path) -> list:
+    """score.db を持つプレイヤーフォルダの名前を並べる。"""
+    base = root / "player"
+    if not base.is_dir():
+        return []
+    names = []
+    for p in sorted(base.iterdir()):
+        try:
+            if p.is_dir() and (p / "score.db").exists():
+                names.append(p.name)
+        except OSError:
+            continue
+    return names
+
+
+def default_player(root: Path, players: list) -> str:
+    """config.json に書かれているプレイヤーを優先して選ぶ。"""
+    if not players:
+        return ""
+    cfg = root / "config.json"
+    if cfg.exists():
+        try:
+            data = json.loads(cfg.read_text(encoding="utf-8-sig"))
+            name = str(data.get("playername") or "")
+            if name in players:
+                return name
+        except Exception:  # noqa: BLE001
+            pass
+    return players[0]
+
+
+def _ro_uri(path: Path) -> str:
+    return path.resolve().as_uri() + "?mode=ro"
+
+
+class ChartCounter:
+    """条件に当てはまる譜面の数を数える。使い終わったら close する。"""
+
+    def __init__(self, root: Path, player: str):
+        self.root = root
+        self.player = player
+        self.con = None
+        self.notes = []
+
+    def open(self):
+        songdb = self.root / "songdata.db"
+        if not songdb.exists():
+            raise ValueError(f"songdata.db が見つかりません: {songdb}")
+        self.con = sqlite3.connect(_ro_uri(songdb), uri=True)
+        pdir = self.root / "player" / self.player if self.player else None
+        for name, ddl in (("score", SCORE_TABLE_DDL),
+                          ("scorelog", SCORELOG_TABLE_DDL)):
+            path = (pdir / f"{name}.db") if pdir else None
+            if path is not None and path.exists():
+                self.con.execute(f"ATTACH DATABASE '{_ro_uri(path)}' AS {name}db")
+            else:
+                # 無い場合は空のテーブルを作る（未プレイ扱いになる）
+                self.con.execute(ddl)
+                self.notes.append(f"{name}.db が無いため、スコアなしとして数えます。")
+        return self
+
+    def count(self, where: str) -> int:
+        sql = ("SELECT COUNT(*) FROM (SELECT DISTINCT " + COUNT_COLUMNS +
+               " FROM song AS song LEFT OUTER JOIN (score LEFT OUTER JOIN"
+               " scorelog ON score.sha256 = scorelog.sha256)"
+               " ON song.sha256 = score.sha256 WHERE " + where + ")")
+        return int(self.con.execute(sql).fetchone()[0])
+
+    def close(self):
+        if self.con is not None:
+            try:
+                self.con.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.con = None
+
+
+def prune_empty(folders: list, counter: ChartCounter, progress=None) -> tuple:
+    """
+    譜面が0件のフォルダを取り除く。
+    戻り値 (残ったフォルダ, 調べた数, 消した末端の数, 消えた親の数)
+    """
+    checked = [0]
+    gone_leaf = [0]
+    gone_dir = [0]
+
+    def walk(nodes):
+        kept = []
+        for node in nodes:
+            if node.get("folder") is not None:
+                sub = walk(node["folder"])
+                if sub:
+                    node["folder"] = sub
+                    kept.append(node)
+                else:
+                    gone_dir[0] += 1
+            else:
+                checked[0] += 1
+                if progress and checked[0] % 50 == 0:
+                    progress(checked[0])
+                if counter.count(node["sql"]) > 0:
+                    kept.append(node)
+                else:
+                    gone_leaf[0] += 1
+        return kept
+
+    return walk(folders), checked[0], gone_leaf[0], gone_dir[0]
+
+
 def describe_folder(node) -> str:
     """一覧に出す説明文を作る。"""
     if not isinstance(node, dict):
@@ -778,6 +992,38 @@ def describe_folder(node) -> str:
 # ===========================================================================
 # GUI 部品
 # ===========================================================================
+def make_range_tree(master, rows: int, name_w: int = 190, value_w: int = 110):
+    """
+    「名前 / 下限 / - / 上限」の4列を持つ一覧を作る。
+    空白で桁を合わせると、日本語混じりの名前でずれてしまうため、
+    表の列そのもので位置を決める。値はすべて左揃え、「-」だけ中央。
+    """
+    tree = ttk.Treeview(master, columns=("name", "lo", "dash", "hi"),
+                        show="", height=rows, selectmode="extended")
+    tree.column("name", width=name_w, minwidth=80, anchor="w", stretch=True)
+    tree.column("lo", width=value_w, minwidth=40, anchor="w", stretch=False)
+    tree.column("dash", width=24, minwidth=24, anchor="center", stretch=False)
+    tree.column("hi", width=value_w, minwidth=40, anchor="w", stretch=False)
+    return tree
+
+
+def tree_clear(tree):
+    for iid in tree.get_children():
+        tree.delete(iid)
+
+
+def tree_selected_indices(tree) -> list:
+    children = list(tree.get_children())
+    return sorted(children.index(iid) for iid in tree.selection()
+                  if iid in children)
+
+
+def tree_select_index(tree, index: int):
+    children = list(tree.get_children())
+    if 0 <= index < len(children):
+        tree.selection_set(children[index])
+
+
 class ScrollFrame(ttk.Frame):
     """縦スクロールする入れ物。"""
 
@@ -814,17 +1060,19 @@ class ScrollFrame(ttk.Frame):
 class RangeEditor(ttk.Frame):
     """「名前 / 下限 / 上限」のリストを編集する部品。"""
 
-    def __init__(self, master, defaults, unit_label, rows=5, flag_text=None):
+    def __init__(self, master, defaults, unit_label, rows=5, flag_text=None,
+                 namer=None):
         super().__init__(master)
         self.defaults = [unpack_range(d) for d in defaults]
         self.flag_var = tk.BooleanVar(value=False) if flag_text else None
+        self.flag_text = flag_text or ""
+        self.namer = namer
 
-        self.listbox = tk.Listbox(self, height=rows, exportselection=False,
-                                  font=("Consolas", 10))
-        self.listbox.grid(row=0, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(self, orient="vertical", command=self.listbox.yview)
+        self.tree = make_range_tree(self, rows)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         sb.grid(row=0, column=1, sticky="ns")
-        self.listbox.configure(yscrollcommand=sb.set)
+        self.tree.configure(yscrollcommand=sb.set)
 
         form = ttk.Frame(self)
         form.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
@@ -858,14 +1106,15 @@ class RangeEditor(ttk.Frame):
         self.reset()
 
     def _refresh(self):
-        self.listbox.delete(0, "end")
+        tree_clear(self.tree)
         for nm, lo, hi, flag in self.items:
             if flag:
-                self.listbox.insert("end", f"{nm:<20} {'BPM変化あり':>15}")
+                self.tree.insert("", "end",
+                                 values=(nm, self.flag_text, "", ""))
                 continue
-            lo_s = "-" if lo is None else str(lo)
-            hi_s = "-" if hi is None else str(hi)
-            self.listbox.insert("end", f"{nm:<20} {lo_s:>6} 〜 {hi_s:>6}")
+            lo_s = "" if lo is None else str(lo)
+            hi_s = "" if hi is None else str(hi)
+            self.tree.insert("", "end", values=(nm, lo_s, "-", hi_s))
 
     @staticmethod
     def _parse(s):
@@ -880,9 +1129,6 @@ class RangeEditor(ttk.Frame):
 
     def add(self):
         name = self.e_name.get().strip()
-        if not name:
-            messagebox.showwarning(APP_TITLE, "名前を入れてください。")
-            return
         flag = bool(self.flag_var.get()) if self.flag_var is not None else False
         try:
             lo = self._parse(self.e_lo.get())
@@ -900,6 +1146,12 @@ class RangeEditor(ttk.Frame):
             if lo is not None and hi is not None and lo > hi:
                 messagebox.showwarning(APP_TITLE, "下限が上限を超えています。")
                 return
+        if not name:
+            # 名前を空にしたときは下限・上限から自動で付ける
+            name = self.namer(lo, hi, flag) if self.namer else ""
+            if not name:
+                messagebox.showwarning(APP_TITLE, "名前を入れてください。")
+                return
         self.items.append((name, lo, hi, flag))
         self._refresh()
         for e in (self.e_name, self.e_lo, self.e_hi):
@@ -908,12 +1160,12 @@ class RangeEditor(ttk.Frame):
             self.flag_var.set(False)
 
     def remove(self):
-        for i in reversed(list(self.listbox.curselection())):
+        for i in reversed(tree_selected_indices(self.tree)):
             del self.items[i]
         self._refresh()
 
     def move(self, delta):
-        sel = self.listbox.curselection()
+        sel = tree_selected_indices(self.tree)
         if not sel:
             return
         i = sel[0]
@@ -922,7 +1174,7 @@ class RangeEditor(ttk.Frame):
             return
         self.items[i], self.items[j] = self.items[j], self.items[i]
         self._refresh()
-        self.listbox.selection_set(j)
+        tree_select_index(self.tree, j)
 
     def get_ranges(self):
         return list(self.items)
@@ -935,13 +1187,11 @@ class RankEditor(ttk.Frame):
         super().__init__(master)
         self.defaults = [tuple(d) for d in defaults]
         self.values = list(values)
-
-        self.listbox = tk.Listbox(self, height=rows, exportselection=False,
-                                  font=("Consolas", 10))
-        self.listbox.grid(row=0, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(self, orient="vertical", command=self.listbox.yview)
+        self.tree = make_range_tree(self, rows)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         sb.grid(row=0, column=1, sticky="ns")
-        self.listbox.configure(yscrollcommand=sb.set)
+        self.tree.configure(yscrollcommand=sb.set)
 
         form = ttk.Frame(self)
         form.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
@@ -974,9 +1224,9 @@ class RankEditor(ttk.Frame):
         self.reset()
 
     def _refresh(self):
-        self.listbox.delete(0, "end")
+        tree_clear(self.tree)
         for nm, lo, hi in self.items:
-            self.listbox.insert("end", f"{nm:<20} {lo:>4} 〜 {hi:>4}")
+            self.tree.insert("", "end", values=(nm, lo, "-", hi))
 
     def reset(self):
         self.items = list(self.defaults)
@@ -999,12 +1249,12 @@ class RankEditor(ttk.Frame):
         self.e_name.delete(0, "end")
 
     def remove(self):
-        for i in reversed(list(self.listbox.curselection())):
+        for i in reversed(tree_selected_indices(self.tree)):
             del self.items[i]
         self._refresh()
 
     def move(self, delta):
-        sel = self.listbox.curselection()
+        sel = tree_selected_indices(self.tree)
         if not sel:
             return
         i = sel[0]
@@ -1013,7 +1263,7 @@ class RankEditor(ttk.Frame):
             return
         self.items[i], self.items[j] = self.items[j], self.items[i]
         self._refresh()
-        self.listbox.selection_set(j)
+        tree_select_index(self.tree, j)
 
     def get_ranges(self):
         return list(self.items)
@@ -1055,6 +1305,9 @@ class App(tk.Tk):
         self.bp_noplay = tk.BooleanVar(value=True)
         self.lamp_enabled = tk.BooleanVar(value=False)
         self.score_enabled = tk.BooleanVar(value=False)
+        self.split_levels = tk.BooleanVar(value=False)
+        self.skip_empty = tk.BooleanVar(value=True)
+        self.player_var = tk.StringVar()
         self.msg_queue: queue.Queue = queue.Queue()
         self.list_rows: list = []
 
@@ -1068,15 +1321,17 @@ class App(tk.Tk):
     def _build_ui(self):
         top = ttk.Frame(self, padding=(10, 10, 10, 0))
         top.pack(fill="x")
-        ttk.Label(top, text="beatoraja のフォルダ（または folder/default.json）").pack(
-            anchor="w")
+        ttk.Label(
+            top,
+            text="beatoraja本体と同じ場所にある「folder」フォルダ"
+                 "（この中の default.json を書き換えます）").pack(anchor="w")
         row = ttk.Frame(top)
         row.pack(fill="x", pady=(4, 0))
         ttk.Entry(row, textvariable=self.path_var).pack(
             side="left", fill="x", expand=True)
-        ttk.Button(row, text="参照…", command=self._choose_dir).pack(
+        ttk.Button(row, text="folderを選ぶ…", command=self._choose_dir).pack(
             side="left", padx=(6, 0))
-        ttk.Button(row, text="ファイル指定…", command=self._choose_file).pack(
+        ttk.Button(row, text="default.jsonを直接指定…", command=self._choose_file).pack(
             side="left", padx=(6, 0))
 
         self.nb = ttk.Notebook(self)
@@ -1135,14 +1390,20 @@ class App(tk.Tk):
             row=1, column=1, padx=(6, 0), pady=(4, 0))
         addf.columnconfigure(0, weight=1)
 
+        ttk.Checkbutton(
+            b, text="最下層を難易度レベルにする（各フォルダの中に sl0・★1 などを作る）",
+            variable=self.split_levels).pack(anchor="w", pady=(8, 0))
+
         # --- 2. BPM ---
         s2 = Section(page, "2. BPM", self.bpm_enabled, "BPMで絞る")
         s2.pack(fill="x", padx=6, pady=(10, 0))
         b = s2.body
         self.bpm_editor = RangeEditor(b, DEFAULT_BPM_RANGES, "BPM", rows=6,
-                                      flag_text="BPM変化あり")
+                                      flag_text="BPM変化あり",
+                                      namer=bpm_name)
         self.bpm_editor.pack(fill="x")
-        ttk.Label(b, text="song.minbpm >= 下限 AND song.maxbpm <= 上限 になります。"
+        ttk.Label(b, text="名前を空にして「追加」すると、下限・上限から自動で名前を付けます。"
+                          "song.minbpm >= 下限 AND song.maxbpm <= 上限 になります。"
                           "「BPM変化あり」を付けた行は下限・上限を無視して、"
                           "song.minbpm != song.maxbpm になります。",
                   foreground="#555", wraplength=800, justify="left").pack(
@@ -1156,10 +1417,12 @@ class App(tk.Tk):
         r.pack(fill="x")
         ttk.Checkbutton(r, text="「未プレイ」も作る", variable=self.bp_noplay).pack(
             side="left")
-        self.bp_editor = RangeEditor(b, DEFAULT_BP_RANGES, "BP", rows=6)
+        self.bp_editor = RangeEditor(b, DEFAULT_BP_RANGES, "BP", rows=6,
+                                     namer=lambda lo, hi, flag: bp_name(lo, hi))
         self.bp_editor.pack(fill="x", pady=(6, 0))
         ttk.Label(b, text="自己ベストの最小BAD+POOR（score.minbp）で絞ります。"
-                          "プレイ済みの譜面だけが対象です。",
+                          "プレイ済みの譜面だけが対象です。"
+                          "名前を空にして「追加」すると自動で名前を付けます。",
                   foreground="#555").pack(anchor="w", pady=(6, 0))
 
         # --- 4. LAMP ---
@@ -1197,6 +1460,17 @@ class App(tk.Tk):
             side="left", fill="x", expand=True, padx=(8, 0))
         ttk.Label(s4, textvariable=self.hint_var, foreground="#555").pack(
             anchor="w", pady=(4, 0))
+
+        ef = ttk.Frame(s4)
+        ef.pack(fill="x", pady=(8, 0))
+        ttk.Checkbutton(ef, text="譜面が0件のフォルダを作らない",
+                        variable=self.skip_empty).pack(side="left")
+        ttk.Label(ef, text="プレイヤー").pack(side="left", padx=(16, 4))
+        self.player_box = ttk.Combobox(ef, textvariable=self.player_var,
+                                       width=18, state="readonly")
+        self.player_box.pack(side="left")
+        ttk.Label(ef, text="songdata.db と score.db を読み取り専用で開いて数えます。",
+                  foreground="#555").pack(side="left", padx=(10, 0))
         for var in (self.tbl_enabled, self.bpm_enabled, self.bp_enabled,
                     self.lamp_enabled, self.score_enabled):
             var.trace_add("write", lambda *_a: self._update_hint())
@@ -1351,7 +1625,8 @@ class App(tk.Tk):
             self.hint_var.set("条件を選ぶと、未入力のときの名前がここに出ます")
 
     def _choose_dir(self):
-        d = filedialog.askdirectory(title="beatoraja のフォルダを選ぶ")
+        d = filedialog.askdirectory(
+            title="beatoraja本体と同じ場所にある folder フォルダを選ぶ")
         if d:
             self.path_var.set(str(guess_default_json(Path(d))))
             self.reload_list()
@@ -1443,7 +1718,20 @@ class App(tk.Tk):
         return guess_default_json(Path(s))
 
     # -- 「生成したフォルダ」タブ -------------------------------------------
+    def refresh_players(self):
+        """beatoraja のフォルダからプレイヤー一覧を読み直す。"""
+        target = self._target()
+        players = list_players(beatoraja_root(target)) if target else []
+        try:
+            self.player_box.configure(values=players)
+        except Exception:  # noqa: BLE001
+            pass
+        if self.player_var.get() not in players:
+            self.player_var.set(default_player(beatoraja_root(target), players)
+                                if target else "")
+
     def reload_list(self):
+        self.refresh_players()
         for w in self.list_frame.inner.winfo_children():
             w.destroy()
         self.list_rows = []
@@ -1572,6 +1860,9 @@ class App(tk.Tk):
             "lamp": (self.lamp_enabled.get(), self.lamp_editor.get_ranges()),
             "score": (self.score_enabled.get(),
                       self.score_editor.get_ranges()),
+            "split_levels": self.split_levels.get(),
+            "skip_empty": self.skip_empty.get(),
+            "player": self.player_var.get(),
         }
         self.btn_preview.state(["disabled"])
         self.btn_write.state(["disabled"])
@@ -1622,7 +1913,7 @@ class App(tk.Tk):
             self.msg_queue.put(("tables", None))
 
         new_folders = build_folder(tables, p["bpm"], p["bp"], p["lamp"],
-                                   p["score"], p["title"])
+                                   p["score"], p["title"], p["split_levels"])
         if not new_folders:
             self.log("生成する対象がありません。")
             return
@@ -1633,11 +1924,19 @@ class App(tk.Tk):
                 self.log("  ! " + msg)
             raise ValueError("生成したフォルダ定義に問題があります。ログを確認してください。")
 
+        if p["skip_empty"]:
+            self._prune(new_folders, p)
+
         for f in new_folders:
             children = f.get("folder") or []
             self.log(f"\n作られるフォルダ: {ROOT_NAME} > {f['name']}"
                      f"（中身 {len(children)}件）")
             self._log_leaves(children, limit=10)
+
+        if not (new_folders and (new_folders[0].get("folder") or [])):
+            self.log("\n条件に当てはまる譜面が1つもありませんでした。"
+                     "条件を見直すか、「譜面が0件のフォルダを作らない」を外してください。")
+            return
 
         existing, err = read_existing(target)
         if existing is None:
@@ -1688,9 +1987,46 @@ class App(tk.Tk):
         self.set_status("書き込み完了")
         self.msg_queue.put(("refresh", None))
 
+    def _prune(self, folders, p):
+        """譜面数を数えて、0件のフォルダを取り除く。失敗しても生成は続ける。"""
+        root = beatoraja_root(p["target"])
+        counter = ChartCounter(root, p["player"])
+        total = count_leaves(folders)
+        started = time.time()
+        try:
+            counter.open()
+        except Exception as e:  # noqa: BLE001
+            self.log(f"\n譜面数を数えられませんでした（{e}）。"
+                     "0件のフォルダもそのまま作ります。")
+            return
+        for note in counter.notes:
+            self.log("  " + note)
+        self.log(f"\n譜面数を数えています（{total}件）… "
+                 f"player: {p['player'] or '（なし）'}")
+        self.set_status("譜面数を数えています…")
+        try:
+            kept, checked, gone_leaf, gone_dir = prune_empty(
+                folders, counter,
+                progress=lambda n: self.set_status(f"譜面数を数えています… {n}/{total}"))
+            folders[:] = kept
+            msg = f"  {checked}件を確認し、0件だった {gone_leaf}件を除きました"
+            if gone_dir:
+                msg += f"（中身が無くなった親フォルダ {gone_dir}件も削除）"
+            self.log(msg + f"（{time.time() - started:.1f}秒）")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"  数え上げに失敗しました（{e}）。0件のフォルダもそのまま作ります。")
+        finally:
+            counter.close()
+
     def _log_leaves(self, nodes, limit):
         """作られる中身を数件だけログに出す。"""
         for node in nodes[:limit]:
+            if node.get("folder") is not None:
+                names = "、".join(c["name"] for c in node["folder"][:5])
+                more = "…" if len(node["folder"]) > 5 else ""
+                self.log(f"    {node['name']} / "
+                         f"（{len(node['folder'])}件: {names}{more}）")
+                continue
             sql = node.get("sql", "")
             if len(sql) > 68:
                 sql = sql[:68] + "…"
